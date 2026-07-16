@@ -140,3 +140,8 @@ class TestSaveConfigCloud:
              patch("hevy2garmin.db.get_db", return_value=fake_db):
             # Must not propagate — settings save should never 500 on a DB hiccup
             save_config({"user_profile": {"weight_kg": 80.0}})
+
+
+def test_default_has_grace_period() -> None:
+    """DEFAULT_CONFIG must include sync.grace_period_minutes."""
+    assert DEFAULT_CONFIG["sync"]["grace_period_minutes"] == 120

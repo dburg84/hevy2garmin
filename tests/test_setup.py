@@ -59,3 +59,25 @@ class TestSetupNoRedundantLogin:
             resp = _post(client)
         mock_get_client.assert_called_once()
         assert resp.status_code in (200, 303)
+
+    def test_local_gate_skips_get_client_when_cooling_down(self, client):
+        """During active cooldown, setup must NOT call get_client (would reset Garmin's timer)."""
+        from datetime import datetime, timedelta, timezone
+        from hevy2garmin.ratelimit import _KEY
+
+        class FakeDB:
+            def __init__(self):
+                until = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+                self._state = {_KEY: {"until": until, "hits": 1, "seconds": 7200}}
+            def get_app_config(self, key):
+                return self._state.get(key)
+            def set_app_config(self, key, value):
+                self._state[key] = value
+
+        with patch("hevy2garmin.server.save_config"), \
+             patch("hevy2garmin.db.get_database_url", return_value=None), \
+             patch("hevy2garmin.db.get_db", return_value=FakeDB()), \
+             patch("hevy2garmin.garmin.get_client") as mock_get_client:
+            resp = _post(client)
+        mock_get_client.assert_not_called()
+        assert resp.status_code == 200  # renders cooldown error page, not redirect

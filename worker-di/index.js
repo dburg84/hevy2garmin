@@ -90,6 +90,20 @@ const CORS_HEADERS = {
 // within a few minutes, so we don't bother keeping KV entries around longer.
 const MFA_SESSION_TTL_SECONDS = 600;
 
+// Rate-limit cooldown (#214). When Garmin returns a 429 for a login, we stash a
+// per-account cooldown in KV and short-circuit further /login attempts for that
+// account until it lapses, so a determined user can't bypass the client-side
+// cooldown (0.5.14) by POSTing the Worker directly and deepen Garmin's throttle
+// (#147). Keyed per account because this Worker is shared across every
+// self-hosted instance and Garmin throttles per-account, so a global key would
+// let one account's 429 lock out everyone. Uses a flat 2h window (the local
+// server's ratelimit.py base) as a backstop; it intentionally does NOT
+// replicate the client's exponential backoff, so for a repeatedly-throttled
+// account the two layers can report different waits. The KV entry's TTL equals
+// the cooldown, so it self-clears exactly when the window ends.
+const COOLDOWN_KEY_PREFIX = "cooldown:";
+const COOLDOWN_SECONDS = 2 * 3600;
+
 // ── Main handler ───────────────────────────────────────────────────────────
 
 export default {
@@ -156,6 +170,15 @@ async function handleLogin(request, env) {
     return json({ status: "error", message: "email and password required" }, 400);
   }
 
+  // Hard-enforce the per-account cooldown before touching Garmin (#214). If this
+  // account is still cooling down from an earlier 429, return immediately so we
+  // never add to Garmin's throttle. Fails open: any KV error proceeds to Garmin
+  // rather than locking the account out (this Worker is shared).
+  const remaining = await cooldownRemaining(env, email);
+  if (remaining > 0) {
+    return json({ status: "rate_limited", retry_after_seconds: remaining });
+  }
+
   // Mobile-first: the mobile/app login endpoint is the one Garmin designed for
   // native MFA, so it's the least likely to reject programmatic logins with a
   // 427. Fall back to the portal endpoint ONLY on a 427 (MFA-routing). We do
@@ -164,10 +187,18 @@ async function handleLogin(request, env) {
   // and deepens the throttle that won't clear (#147). On 429 we surface
   // rate_limited immediately.
   const first = await tryLoginFlavour(env, email, password, "mobile");
-  if (!first.fallback) return first.response;
+  if (first.rateLimited) return await rateLimitResponse(env, email);
+  if (!first.fallback) {
+    if (first.success) await clearCooldown(env, email);
+    return first.response;
+  }
 
   const second = await tryLoginFlavour(env, email, password, "portal");
-  if (!second.fallback) return second.response;
+  if (second.rateLimited) return await rateLimitResponse(env, email);
+  if (!second.fallback) {
+    if (second.success) await clearCooldown(env, email);
+    return second.response;
+  }
 
   // 427 on both endpoints → Garmin is steering us to the manual flow.
   return json({
@@ -175,6 +206,13 @@ async function handleLogin(request, env) {
     message:
       "Garmin returned error 427 on both login flows. Use the manual sign-in fallback.",
   });
+}
+
+/** Record a fresh cooldown for this account and build the rate_limited
+ *  response the caller sends back. */
+async function rateLimitResponse(env, email) {
+  const secs = await setCooldown(env, email);
+  return json({ status: "rate_limited", retry_after_seconds: secs });
 }
 
 /** Attempt a single login flavour (portal or mobile) and return either a
@@ -269,8 +307,8 @@ async function tryLoginFlavour(env, email, password, flavour) {
   if (loginResp.status === 429) {
     // Never fall back to the other flavour on a rate limit — Garmin's login
     // limit is per-account across both endpoints, so retrying just deepens it
-    // (#147). Surface it so the caller can tell the user to wait it out.
-    return { response: json({ status: "rate_limited" }) };
+    // (#147). Signal the caller to record the cooldown and surface it (#214).
+    return { rateLimited: true };
   }
   let loginData;
   try {
@@ -291,8 +329,9 @@ async function tryLoginFlavour(env, email, password, flavour) {
   // Handle Garmin's custom error envelope.
   const garminErrCode = loginData?.error?.["status-code"];
   if (garminErrCode === "429") {
-    // Per-account rate limit — never retry the other flavour (#147).
-    return { response: json({ status: "rate_limited" }) };
+    // Per-account rate limit — never retry the other flavour (#147). Signal the
+    // caller to record the cooldown and surface it (#214).
+    return { rateLimited: true };
   }
   if (garminErrCode === "427") {
     // 427 routes MFA-enabled accounts to a different flow. Signal the caller to
@@ -335,6 +374,7 @@ async function tryLoginFlavour(env, email, password, flavour) {
       };
     }
     return {
+      success: true,
       response: json({
         status: "success",
         di_token: di.access_token,
@@ -365,6 +405,7 @@ async function tryLoginFlavour(env, email, password, flavour) {
     const sessionId = crypto.randomUUID();
     const sessionState = {
       flavour,
+      email,
       cookies: mergedCookies,
       mfa_method: mfaMethod,
       params: params.toString(),
@@ -480,7 +521,8 @@ async function handleLoginMfa(request, env) {
   }
 
   if (mfaResp.status === 429) {
-    return json({ status: "rate_limited" });
+    const secs = await setCooldown(env, session.email);
+    return json({ status: "rate_limited", retry_after_seconds: secs });
   }
   let mfaData;
   try {
@@ -511,6 +553,7 @@ async function handleLoginMfa(request, env) {
   const di = await exchangeServiceTicket(ticket, serviceUrl);
   if (di.error) return json({ status: "error", message: di.error }, di.status || 502);
   await env.MFA_SESSIONS.delete(sessionId).catch(() => {});
+  await clearCooldown(env, session.email);
 
   return json({
     status: "success",
@@ -518,6 +561,74 @@ async function handleLoginMfa(request, env) {
     di_refresh_token: di.refresh_token,
     di_client_id: extractClientIdFromJwt(di.access_token) || CLIENT_ID,
   });
+}
+
+// ── Rate-limit cooldown helpers (#214) ─────────────────────────────────────
+
+/** SHA-256 hex of the normalized (trimmed, lowercased) email. Used as the KV
+ *  key suffix so we never store the raw address and so casing/whitespace
+ *  variants of the same account map to one cooldown. */
+export async function hashEmail(email) {
+  const norm = (email || "").trim().toLowerCase();
+  const bytes = new TextEncoder().encode(norm);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/** Whole seconds remaining until `until` (ms epoch), floored at 0. */
+export function remainingSeconds(until, now) {
+  return Math.max(0, Math.ceil((until - now) / 1000));
+}
+
+/** Seconds left on this account's cooldown, or 0 if none. Fails open: any KV
+ *  error returns 0 so a KV blip can't lock every account out of login. */
+export async function cooldownRemaining(env, email) {
+  if (!env || !env.MFA_SESSIONS) return 0;
+  try {
+    const hash = await hashEmail(email);
+    const raw = await env.MFA_SESSIONS.get(COOLDOWN_KEY_PREFIX + hash);
+    if (!raw) return 0;
+    const { until } = JSON.parse(raw);
+    if (typeof until !== "number") return 0;
+    return remainingSeconds(until, Date.now());
+  } catch {
+    return 0;
+  }
+}
+
+/** Start (or refresh) this account's cooldown. The KV TTL equals the cooldown
+ *  so the entry self-clears when the window ends. Returns the cooldown length
+ *  in seconds; still returns it on a KV error so the caller reports the real
+ *  429 the user just hit. */
+export async function setCooldown(env, email) {
+  if (env && env.MFA_SESSIONS) {
+    try {
+      const hash = await hashEmail(email);
+      const until = Date.now() + COOLDOWN_SECONDS * 1000;
+      await env.MFA_SESSIONS.put(
+        COOLDOWN_KEY_PREFIX + hash,
+        JSON.stringify({ until }),
+        { expirationTtl: COOLDOWN_SECONDS },
+      );
+    } catch {
+      // fall through — still report the cooldown length to the caller
+    }
+  }
+  return COOLDOWN_SECONDS;
+}
+
+/** Drop this account's cooldown after a genuine Garmin response (the account
+ *  clearly isn't throttled). Best effort; errors are ignored. */
+export async function clearCooldown(env, email) {
+  if (!env || !env.MFA_SESSIONS || !email) return;
+  try {
+    const hash = await hashEmail(email);
+    await env.MFA_SESSIONS.delete(COOLDOWN_KEY_PREFIX + hash);
+  } catch {
+    // best effort
+  }
 }
 
 // ── Shared helpers ─────────────────────────────────────────────────────────

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Any
 
 
 class NoWritableDatabaseError(RuntimeError):
@@ -87,3 +88,47 @@ class Database(ABC):
     @abstractmethod
     def set_app_config(self, key: str, value: dict) -> None:
         """Store a JSON value in the generic key-value app cache."""
+
+    @abstractmethod
+    def claim_pending(self, hevy_id: str, payload: dict[str, Any]) -> bool:
+        """Atomically claim submission authority for a workout."""
+
+    @abstractmethod
+    def get_pending(self, hevy_id: str) -> dict | None:
+        """Return one unfinished upload operation."""
+
+    @abstractmethod
+    def list_pending(self) -> list[dict]:
+        """Return unfinished upload operations, newest first."""
+
+    @abstractmethod
+    def update_pending(self, hevy_id: str, **changes: Any) -> None:
+        """Persist selected pending-operation fields."""
+
+    @abstractmethod
+    def delete_pending(self, hevy_id: str) -> bool:
+        """Abandon an unfinished operation."""
+
+    @abstractmethod
+    def complete_pending(self, hevy_id: str, terminal: dict[str, Any]) -> None:
+        """Atomically upsert terminal state and remove pending state."""
+
+    @abstractmethod
+    def resolve_terminal(
+        self,
+        hevy_id: str,
+        *,
+        status: str,
+        garmin_activity_id: str | None = None,
+        reason: str | None = None,
+        source: str | None = None,
+    ) -> None:
+        """Atomically create a manual/skipped terminal state and clear pending."""
+
+    @abstractmethod
+    def get_workout_states(self, hevy_ids: list[str]) -> dict[str, dict]:
+        """Batch-fetch terminal and pending state with terminal precedence."""
+
+    @abstractmethod
+    def get_terminal_counts(self) -> dict[str, int]:
+        """Return uploaded, manual, skipped, and total terminal counts."""

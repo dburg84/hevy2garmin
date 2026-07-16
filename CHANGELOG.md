@@ -6,6 +6,61 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- The watch-activity **Replace** strategy now extracts high-resolution heart-rate samples from the original Garmin FIT and embeds them in the named Hevy replacement before deleting the watch copy. If the source cannot be extracted or restored from backup, replacement stops and preserves the original activity.
+
+## [0.5.19] - 2026-07-14
+
+### Added
+- Safe Garmin upload recovery ([#227](https://github.com/drkostas/hevy2garmin/pull/227), thanks @donndonn). Uploads that fail mid-request (crash/timeout) are parked in a durable `pending_uploads` table instead of being blindly re-uploaded, so an upload that may have reached Garmin never creates a duplicate. Rename/description/watch-delete resume from checkpoints, same-id deletion is blocked, and delete retries are capped. New CLI and web controls to resolve stuck syncs: reconcile (never uploads, adopts an activity only with a start-time match and upload evidence), retry-failed-only, abandon, mark-synced, and skip.
+
+## [0.5.18] - 2026-07-14
+
+### Fixed
+- Python 3.10 compatibility: timestamps with a single fractional-second digit (e.g. `2026-03-15T18:02:00.0`) or a space date/time separator no longer raise `ValueError` on Python 3.10, which the project supports. All ISO-8601 parsing now goes through a shared `parse_iso()` helper that normalizes the fraction width and the `Z`/space separators (previously 15 `datetime.fromisoformat` call sites could fail on 3.10 for such timestamps). (#229)
+
+## [0.5.17] - 2026-07-13
+
+### Fixed
+- The "Not configured" error is now context-aware. On the cloud / GitHub Actions path (DATABASE_URL set) it no longer tells you to run `hevy2garmin init` (a local interactive wizard that can't run in Actions); instead it points you to finish setup in the dashboard and to make sure `DATABASE_URL` matches your deployment's database. (#224)
+
+## [0.5.16] - 2026-07-13
+
+### Fixed
+- Merge mode: when Garmin rejects one exercise's name as an invalid sub-category, only that exercise's name is now stripped instead of every name in the workout. The offender is found by bisecting the payload (the atomic PUT gives no per-exercise error), so the rest of your exercises keep their real names. Falls back to stripping all names only if several exercises are rejected. (#222)
+
+## [0.5.15] - 2026-07-10
+
+### Changed
+- Unified the bulk sync and per-workout cron sync paths behind a single `sync_one_workout()` helper. The Vercel cron now gets the same merge-reliability behavior (grace period, heart-rate retry, duplicate awareness) that the CLI and autosync paths already had. Thanks @donndonn for the contribution (#208, closes #206).
+
+### Fixed
+- The description toggle is now respected on the web sync path, and calories and average heart rate carry through on the merge path.
+
+## [0.5.14] - 2026-07-09
+
+### Added
+- **Enforced cooldown after a Garmin login rate-limit** ([#211](https://github.com/drkostas/hevy2garmin/issues/211)). When Garmin rate-limits a login, retrying resets Garmin's own timer and makes it worse. The tool now records an exponential-backoff cooldown (2h, then 4h, 8h, capped at 24h, reset after a clean login) and, while it is active, the local setup skips the Garmin login attempt entirely so you cannot deepen the block by retrying. Cloud rate-limits are recorded too, and the setup page and dashboard show a live countdown with the Connect button disabled until it clears. Sync resumes automatically once the window passes.
+
+## [0.5.13] - 2026-07-09
+
+### Added
+- **Grace period before syncing** ([#205](https://github.com/drkostas/hevy2garmin/issues/205)). Automatic syncs (self-hosted auto-sync and the CLI) now wait `sync.grace_period_minutes` (default 120) after a workout ends before syncing it, so the Garmin watch activity has time to appear and the workout merges into one activity instead of creating a duplicate. Manual "Sync now" ignores the grace period.
+- **Duplicate detection (log-only)** ([#205](https://github.com/drkostas/hevy2garmin/issues/205)). Each sync scans recent workouts and reports any that ended up with both a tool-created and a watch activity for the same session, plus a manual "scan for duplicates" action. It only reports, it does not delete anything.
+
+### Fixed
+- **Fresh uploads that land without heart rate are now retried once and reported** ([#205](https://github.com/drkostas/hevy2garmin/issues/205)). The heart-rate fetch retries once if the first attempt is empty, and an upload that still ends up without HR is counted and logged instead of silently having none.
+
+### Note
+- Merge reliability currently applies to the self-hosted and CLI sync path. Bringing it to the Vercel cron path is tracked in [#206](https://github.com/drkostas/hevy2garmin/issues/206).
+
+## [0.5.12] - 2026-07-07
+
+### Fixed
+- **Merge dropped every exercise set when Garmin rejected one exercise** ([#199](https://github.com/drkostas/hevy2garmin/issues/199)). The exerciseSets push is atomic, so a single exercise whose (category, subcategory) pair Garmin rejects (a 400 "Invalid Sub-Category") made the whole activity lose its sets, and after three such workouts merge was disabled for the rest of the run. It now retries once with the exercise names stripped (the category is kept, which Garmin always accepts), so the sets, reps and weights still land. Thanks @silas_christopher for the detailed report.
+- **Some exercises showed as "Total Body" instead of their real category** ([#201](https://github.com/drkostas/hevy2garmin/issues/201)). Cardio machines (cycling, treadmill, elliptical, rowing machine and others) and a few rows were mapped to FIT categories the bundled library does not implement, so they fell back to the generic Total Body. They now use valid categories: cardio machines show as Cardio, and the chest-supported dumbbell row shows its real name.
+- **Misleading Garmin rate-limit message** ([#202](https://github.com/drkostas/hevy2garmin/issues/202)). The setup screen said to "wait a few minutes" on a Garmin rate limit, but it is usually a few hours and retrying resets the timer. The message now says so, and makes clear it is on Garmin's side and separate from your password.
+
 ## [0.5.11] - 2026-06-26
 
 ### Added

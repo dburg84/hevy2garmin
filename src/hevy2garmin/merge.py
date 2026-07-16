@@ -15,6 +15,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from hevy2garmin._isotime import parse_iso
 
 from hevy2garmin.garmin import (
     find_matching_garmin_activity,
@@ -148,6 +149,96 @@ def _exercise_to_string(cat_id: int, sub_id: int) -> str | None:
     return None
 
 
+def _strip_exercise_names(payload: dict) -> dict:
+    """Return a copy of an exerciseSets payload with every exercise *name*
+    removed but the category kept. Garmin always accepts a ``null`` name under a
+    valid parent category, so this is the safe fallback when it rejects a
+    specific ``(category, subcategory)`` pair."""
+    stripped = dict(payload)
+    stripped["exerciseSets"] = [
+        {**s, "exercises": [{**ex, "name": None} for ex in s.get("exercises", [])]}
+        for s in payload.get("exerciseSets", [])
+    ]
+    return stripped
+
+
+def _named_exercise_keys(payload: dict) -> list[tuple]:
+    """Distinct ``(category, name)`` of exercises that carry a name, first-seen
+    order. These are the candidates Garmin might reject as an invalid sub-category."""
+    keys: list[tuple] = []
+    seen: set[tuple] = set()
+    for s in payload.get("exerciseSets", []):
+        for ex in s.get("exercises", []):
+            name = ex.get("name")
+            if name is None:
+                continue
+            k = (ex.get("category"), name)
+            if k not in seen:
+                seen.add(k)
+                keys.append(k)
+    return keys
+
+
+def _strip_names_for(payload: dict, bad: set) -> dict:
+    """Copy of the payload with the name removed only for exercises whose
+    ``(category, name)`` is in ``bad`` (category kept)."""
+    stripped = dict(payload)
+    stripped["exerciseSets"] = [
+        {
+            **s,
+            "exercises": [
+                {**ex, "name": None} if (ex.get("category"), ex.get("name")) in bad else ex
+                for ex in s.get("exercises", [])
+            ],
+        }
+        for s in payload.get("exerciseSets", [])
+    ]
+    return stripped
+
+
+def _push_stripping_offenders(client, activity_id: int, payload: dict) -> None:
+    """Land the sets while keeping as many exercise names as possible.
+
+    Garmin's exerciseSets PUT is atomic and reports no per-exercise error, so when
+    it rejects a name as an invalid sub-category we bisect: strip a half of the
+    distinct exercises, retry, and narrow to the offender(s), then strip only those
+    names (category kept). Bounded to ~log2(n) extra PUTs, only on this rare path.
+    Falls back to stripping every name if it can't converge (multiple offenders
+    split across halves). Raises on any non-subcategory error."""
+    keys = _named_exercise_keys(payload)
+    if len(keys) <= 1:
+        push_exercise_sets(client, activity_id, _strip_exercise_names(payload))
+        return
+    cand = keys
+    while len(cand) > 1:
+        mid = len(cand) // 2
+        head = cand[:mid]
+        try:
+            push_exercise_sets(client, activity_id, _strip_names_for(payload, set(head)))
+            cand = head          # stripping head fixed it → offender(s) in head
+        except Exception as e:   # noqa: BLE001
+            if not _is_subcategory_rejection(e):
+                raise
+            cand = cand[mid:]    # still rejected → offender(s) in the tail
+    # Narrowed to one candidate: strip just it. If that still fails there is more
+    # than one offender split across halves, so fall back to stripping every name.
+    try:
+        push_exercise_sets(client, activity_id, _strip_names_for(payload, set(cand)))
+    except Exception as e:  # noqa: BLE001
+        if not _is_subcategory_rejection(e):
+            raise
+        push_exercise_sets(client, activity_id, _strip_exercise_names(payload))
+
+
+def _is_subcategory_rejection(exc: Exception) -> bool:
+    """True when a push failed because Garmin rejected an exercise
+    ``(category, subcategory)`` pair (HTTP 400 "Invalid Sub-Category"). The
+    exerciseSets PUT is atomic, so one such exercise 400s the whole payload,
+    and fit_tool considers these pairs valid so we can't filter them out first."""
+    msg = str(exc).lower()
+    return "sub-category" in msg or "subcategory" in msg or "invalid sub" in msg
+
+
 # ---------------------------------------------------------------------------
 # Payload builder
 # ---------------------------------------------------------------------------
@@ -173,7 +264,7 @@ def build_exercise_sets_payload(
     start_str = activity_start_time.replace(" ", "T")
     if "+" not in start_str and not start_str.endswith("Z"):
         start_str += "+00:00"
-    act_start = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+    act_start = parse_iso(start_str)
 
     exercises = hevy_workout.get("exercises", [])
     if not exercises:
@@ -390,14 +481,33 @@ def attempt_merge(
     title = hevy_workout.get("title", "Workout")
     payload = build_exercise_sets_payload(hevy_workout, activity_id, act_start, act_duration)
 
-    # PUT exercise sets
+    # PUT exercise sets. The exerciseSets PUT is atomic: a single exercise whose
+    # (category, subcategory) pair Garmin rejects 400s the WHOLE payload and would
+    # drop every set (silas_christopher, r/Hevy). fit_tool treats these pairs as
+    # valid, so we can't screen them out up front. On that rejection, retry once
+    # with exercise names stripped (category kept, which Garmin always accepts) so
+    # the structured sets/reps/weights still land instead of losing the entire
+    # merge; the names then show as the generic category label.
     try:
         push_exercise_sets(client, activity_id, payload)
         _consecutive_failures = 0
     except Exception as e:
-        _consecutive_failures += 1
-        logger.error("PUT exerciseSets failed for activity %s: %s", activity_id, e)
-        return MergeResult(merged=False, fallback_reason=f"PUT failed: {e}")
+        if _is_subcategory_rejection(e):
+            logger.warning(
+                "  exerciseSets rejected a subcategory for activity %s (%s); "
+                "retrying, stripping only the offending exercise name(s)", activity_id, e,
+            )
+            try:
+                _push_stripping_offenders(client, activity_id, payload)
+                _consecutive_failures = 0
+            except Exception as e2:
+                _consecutive_failures += 1
+                logger.error("PUT exerciseSets failed for activity %s even without names: %s", activity_id, e2)
+                return MergeResult(merged=False, fallback_reason=f"PUT failed: {e2}")
+        else:
+            _consecutive_failures += 1
+            logger.error("PUT exerciseSets failed for activity %s: %s", activity_id, e)
+            return MergeResult(merged=False, fallback_reason=f"PUT failed: {e}")
 
     # hevy2garmin's own uploads (DEVELOPMENT) display the pushed names, so verify
     # there and fall back to a named upload if Garmin dropped them. For
