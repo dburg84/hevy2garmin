@@ -6,8 +6,21 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-20
+
+### Fixed
+- Routine sync no longer risks a duplicate planned workout when Garmin scheduling fails mid-sync. Previously the created workout was only recorded *after* the schedule call, so a Garmin 429/500 on scheduling left the workout orphaned and untracked, and the next sync created a second copy. The workout is now persisted right after creation (as `schedule_pending`); if scheduling then fails, the next sync deletes and recreates that tracked workout and retries the schedule instead of duplicating it.
+
+## [0.5.21] - 2026-07-19
+
+### Fixed
+- The **Replace** watch strategy no longer aborts the whole sync when the watch's high-resolution HR cannot be extracted (a 0.5.20 regression, [#244](https://github.com/drkostas/hevy2garmin/issues/244)). It now keeps the watch activity and merges the sets into it in place, so the workout still syncs and the watch HR is never lost. Only the named-exercise display is dropped when the HR cannot be preserved. HR extraction also tolerates a small clock offset between the Hevy workout window and the watch recording.
+
+## [0.5.20] - 2026-07-18
+
 ### Added
 - The watch-activity **Replace** strategy now extracts high-resolution heart-rate samples from the original Garmin FIT and embeds them in the named Hevy replacement before deleting the watch copy. If the source cannot be extracted or restored from backup, replacement stops and preserves the original activity.
+- Sync Hevy routines to Garmin as planned workouts. Maps routine exercises to Garmin workout-service exercise IDs (validated against a real Garmin export), adds timed rest steps between sets, and supports per-routine scheduling (one-off and recurring weekly). Re-sync is checksum-based with a `--force` override, the sync summary reports created vs updated separately, and the dashboard gains a routines page plus a home-screen summary.
 
 ## [0.5.19] - 2026-07-14
 
