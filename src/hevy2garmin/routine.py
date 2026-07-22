@@ -44,6 +44,13 @@ def workout_content_hash(payload: dict) -> str:
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
+# Provenance sentinel appended to every synced routine's Garmin description. Sync
+# reconciliation only ever deletes a same-named Garmin workout that carries this marker,
+# so a workout the user hand-built in Garmin with the same title as a routine is never
+# touched. Mirrors the "synced by hevy2garmin" tag merge.py/generate_description already
+# write onto activities. Keep it stable — it's part of the payload the content hash covers.
+ROUTINE_DESC_MARKER = "— synced from Hevy by hevy2garmin"
+
 # --- Garmin workout-service enums (validated against a real export 2026-07-16) #
 SPORT_TYPE_STRENGTH = {"sportTypeId": 5, "sportTypeKey": "strength_training"}
 
@@ -171,9 +178,14 @@ def routine_to_garmin_workout(
     if unknown:
         logger.info("  Routine '%s': %d exercise(s) had no Garmin mapping", name, unknown)
 
+    # Append the provenance marker, reserving room so the 1024-char cap trims the notes
+    # rather than the marker — reconciliation relies on it being present intact.
+    marker = f"\n{ROUTINE_DESC_MARKER}"
+    notes = (routine.get("notes") or "Synced from Hevy").strip()[: 1024 - len(marker)]
+
     return {
         "workoutName": name,
-        "description": (routine.get("notes") or "Synced from Hevy").strip()[:1024],
+        "description": f"{notes}{marker}",
         "sportType": SPORT_TYPE_STRENGTH,
         "workoutSegments": [
             {

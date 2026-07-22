@@ -23,6 +23,7 @@ from hevy2garmin.garmin import (
     find_activity_by_start_time,
     generate_description,
     get_client,
+    list_workouts,
     rename_activity,
     schedule_workout,
     set_description,
@@ -30,7 +31,11 @@ from hevy2garmin.garmin import (
 )
 from hevy2garmin.hevy import HevyClient
 from hevy2garmin.mapper import lookup_exercise
-from hevy2garmin.routine import routine_to_garmin_workout, workout_content_hash
+from hevy2garmin.routine import (
+    ROUTINE_DESC_MARKER,
+    routine_to_garmin_workout,
+    workout_content_hash,
+)
 from hevy2garmin.merge import attempt_merge, reset_circuit_breaker
 from hevy2garmin.db_interface import Database
 
@@ -827,10 +832,30 @@ def sync_routines(
     _cache_routines_total(store, len(routines))
 
     garmin_client = None
+    # name -> [{"id", "description"}, ...] of the workouts already in the Garmin library.
+    # Built once per run so we can reconcile against Garmin's actual state before creating,
+    # not just the local DB row: a DB reset (ephemeral cloud storage, a migration) or a
+    # crash in the create->persist window would otherwise leave a workout on Garmin that
+    # we no longer track and recreate as a duplicate. We correlate by name (the routine
+    # title we set as workoutName) AND require our provenance marker in the description
+    # before deleting, so a workout the user hand-built in Garmin with the same title is
+    # never touched. Best-effort: if the listing fails we fall back to DB-only dedup; if
+    # Garmin omits the description the marker just won't match, so we create rather than
+    # delete — a possible duplicate, never destroyed user data.
+    library_by_name: dict[str, list[dict]] = {}
     if not dry_run:
         logger.info("Authenticating with Garmin Connect...")
         garmin_client = get_client(garmin_email, garmin_password, garmin_token_dir)
         logger.info("Authenticated successfully")
+        try:
+            for w in list_workouts(garmin_client, limit=999):
+                name, wid = w.get("workoutName"), w.get("workoutId")
+                if name and wid is not None:
+                    library_by_name.setdefault(name, []).append(
+                        {"id": str(wid), "description": w.get("description") or ""}
+                    )
+        except Exception:
+            logger.warning("Could not list Garmin workouts; falling back to DB-only dedup")
 
     stats = {
         "created": 0,
@@ -881,12 +906,24 @@ def sync_routines(
                 stats[outcome] += 1
                 continue
 
-            # Content changed (or forced) — drop the stale Garmin workout first.
+            # Content changed (or forced) — drop the stale Garmin workout(s) first.
+            # That's the DB-tracked id *plus* any same-named library entry that carries
+            # our provenance marker: an orphan from a prior crash or a DB reset that isn't
+            # tracked locally. A same-named entry *without* the marker is the user's own
+            # workout, so it's left untouched. Deleting the rest (deduped, so a tracked id
+            # that also shows up in the library isn't deleted twice) before recreating
+            # keeps sync idempotent instead of stacking a duplicate onto whatever survived.
+            stale_ids = set()
             if existing and existing.get("garmin_workout_id"):
+                stale_ids.add(str(existing["garmin_workout_id"]))
+            for entry in library_by_name.get(payload["workoutName"], []):
+                if ROUTINE_DESC_MARKER in entry["description"]:
+                    stale_ids.add(entry["id"])
+            for wid in stale_ids:
                 try:
-                    delete_workout(garmin_client, existing["garmin_workout_id"])
+                    delete_workout(garmin_client, wid)
                 except Exception:
-                    logger.warning("  Could not delete stale workout %s", existing["garmin_workout_id"])
+                    logger.warning("  Could not delete stale/orphan workout %s", wid)
 
             workout_id = create_workout(garmin_client, payload)
             if workout_id is None:
