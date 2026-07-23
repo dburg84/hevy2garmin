@@ -134,6 +134,14 @@ class SQLiteDatabase(Database):
                 status TEXT DEFAULT 'success'
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS routine_schedules (
+                hevy_routine_id TEXT NOT NULL,
+                schedule_id TEXT NOT NULL,
+                scheduled_date TEXT,
+                PRIMARY KEY (hevy_routine_id, schedule_id)
+            )
+        """)
         # Migration: add content_hash to routine tables created before it existed.
         try:
             conn.execute("ALTER TABLE synced_routines ADD COLUMN content_hash TEXT")
@@ -220,9 +228,101 @@ class SQLiteDatabase(Database):
             "DELETE FROM synced_routines WHERE hevy_routine_id = ?", (hevy_routine_id,)
         )
         deleted = cur.rowcount > 0
+        conn.execute(
+            "DELETE FROM routine_schedules WHERE hevy_routine_id = ?", (hevy_routine_id,)
+        )
         conn.commit()
         conn.close()
         return deleted
+
+    def add_routine_schedule(
+        self, hevy_routine_id: str, schedule_id: str, scheduled_date: str | None = None
+    ) -> None:
+        conn = self._get_conn()
+        conn.execute(
+            "INSERT INTO routine_schedules (hevy_routine_id, schedule_id, scheduled_date) "
+            "VALUES (?, ?, ?) ON CONFLICT(hevy_routine_id, schedule_id) DO NOTHING",
+            (hevy_routine_id, str(schedule_id), scheduled_date),
+        )
+        conn.commit()
+        conn.close()
+
+    def get_routine_schedule_ids(self, hevy_routine_id: str) -> list[str]:
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT schedule_id FROM routine_schedules WHERE hevy_routine_id = ?",
+            (hevy_routine_id,),
+        ).fetchall()
+        conn.close()
+        return [r[0] for r in rows]
+
+    def get_routine_scheduled_dates(self, hevy_routine_id: str) -> list[str]:
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT DISTINCT scheduled_date FROM routine_schedules "
+            "WHERE hevy_routine_id = ? AND scheduled_date IS NOT NULL "
+            "ORDER BY scheduled_date ASC",
+            (hevy_routine_id,),
+        ).fetchall()
+        conn.close()
+        return [r[0] for r in rows]
+
+    def clear_routine_schedules(self, hevy_routine_id: str) -> None:
+        conn = self._get_conn()
+        conn.execute(
+            "DELETE FROM routine_schedules WHERE hevy_routine_id = ?", (hevy_routine_id,)
+        )
+        conn.commit()
+        conn.close()
+
+    def delete_routine_schedule(self, hevy_routine_id: str, schedule_id: str) -> bool:
+        conn = self._get_conn()
+        cur = conn.execute(
+            "DELETE FROM routine_schedules WHERE hevy_routine_id = ? AND schedule_id = ?",
+            (hevy_routine_id, str(schedule_id)),
+        )
+        deleted = cur.rowcount > 0
+        conn.commit()
+        conn.close()
+        return deleted
+
+    @staticmethod
+    def _upcoming_from_where(on_or_after: str, title_query: str | None) -> tuple[str, list]:
+        """Shared FROM/JOIN/WHERE for the upcoming-schedules get + count queries."""
+        sql = (
+            "FROM routine_schedules rs "
+            "LEFT JOIN synced_routines sr ON rs.hevy_routine_id = sr.hevy_routine_id "
+            "WHERE rs.scheduled_date >= ?"
+        )
+        params: list = [on_or_after]
+        if title_query:
+            sql += " AND LOWER(sr.title) LIKE '%' || LOWER(?) || '%'"
+            params.append(title_query)
+        return sql, params
+
+    def get_upcoming_routine_schedules(
+        self, on_or_after: str, limit: int, offset: int, title_query: str | None = None
+    ) -> list[dict]:
+        from_where, params = self._upcoming_from_where(on_or_after, title_query)
+        sql = (
+            "SELECT rs.hevy_routine_id, rs.schedule_id, rs.scheduled_date, sr.title "
+            + from_where
+            + " ORDER BY rs.scheduled_date ASC, sr.title ASC LIMIT ? OFFSET ?"
+        )
+        conn = self._get_conn()
+        rows = conn.execute(sql, params + [limit, offset]).fetchall()
+        conn.close()
+        keys = ("hevy_routine_id", "schedule_id", "scheduled_date", "title")
+        return [dict(zip(keys, r)) for r in rows]
+
+    def count_upcoming_routine_schedules(
+        self, on_or_after: str, title_query: str | None = None
+    ) -> int:
+        from_where, params = self._upcoming_from_where(on_or_after, title_query)
+        conn = self._get_conn()
+        row = conn.execute("SELECT COUNT(*) " + from_where, params).fetchone()
+        conn.close()
+        return row[0] or 0
 
     def get_routine_stats(self) -> dict:
         conn = self._get_conn()

@@ -6,7 +6,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-07-23
+
+### Added
+- A Scheduled Workouts table on the Routines page ([#254](https://github.com/drkostas/hevy2garmin/pull/254), thanks @bcandido). See every upcoming scheduled routine (date and routine name) in one place, filter by start date or name, choose the page size, and remove an entry with one click, which also unschedules it on Garmin. The table reads from the local database, so it still renders even if the Hevy fetch is unavailable.
+
 ### Fixed
+- Re-scheduling a routine no longer stacks duplicate entries on the Garmin calendar ([#254](https://github.com/drkostas/hevy2garmin/pull/254), thanks @bcandido). Garmin appends a fresh calendar entry on every schedule call with no server-side dedup, so the tool now tracks the schedule id Garmin returns and unschedules the prior entries before booking new dates, making re-scheduling idempotent.
 - Routine sync now reconciles against the actual Garmin workout library before creating, so a database reset (ephemeral cloud storage, a migration) or a crash in the create→persist window no longer duplicates planned workouts. Before creating a routine's workout, a same-named workout already in the Garmin library is deleted and recreated instead of stacking a second copy — making routine sync self-healing across DB loss and mid-run failures. To stay safe, reconciliation only ever deletes a workout carrying hevy2garmin's provenance marker (now embedded in every synced routine's description), so a workout you built by hand in Garmin that happens to share a routine's title is never touched. The listing is best-effort: if it fails, sync falls back to the previous DB-only dedup.
 
 ## [0.6.0] - 2026-07-20

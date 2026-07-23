@@ -92,4 +92,22 @@
   {% endif %}
 </div>
 {% endif %}
+
+<div class="card" style="margin-top:16px;">
+  <div class="card-header" style="margin-bottom:12px;"><span class="card-title">Scheduled workouts</span></div>
+  <form hx-get="/api/routines/schedules" hx-target="#scheduled-table" hx-swap="outerHTML"
+        hx-trigger="submit, change, keyup changed delay:400ms"
+        style="display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin-bottom:12px; font-size:13px; color:var(--text-muted);"
+        onsubmit="return false;">
+    <label style="display:flex; gap:6px; align-items:center;">
+      From <input type="date" name="start" value="{{ start_date }}"
+             style="background:var(--bg-primary); color:var(--text); border:1px solid var(--border); border-radius:var(--radius-sm); padding:4px 6px;">
+    </label>
+    <label style="display:flex; gap:6px; align-items:center;">
+      Routine <input type="text" name="q" value="{{ title_query }}" placeholder="filter by name"
+             style="background:var(--bg-primary); color:var(--text); border:1px solid var(--border); border-radius:var(--radius-sm); padding:4px 6px;">
+    </label>
+  </form>
+  {% include "routine_schedules.html" %}
+</div>
 {% endblock %}
