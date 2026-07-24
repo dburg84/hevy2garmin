@@ -6,6 +6,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- Hardened dashboard authentication. Failed logins are now rate-limited per client IP with exponential backoff and a global cap (HTTP 429 on lockout), so the login can't be brute-forced. The dashboard password can be supplied pre-hashed via `H2G_PASSWORD_HASH` (argon2, generated with `hevy2garmin hash-password`) so the plaintext never sits in the environment; session cookies gain the `Secure` flag over HTTPS and are signed with an optional dedicated `H2G_SECRET` (session lifetime configurable via `H2G_SESSION_TTL_DAYS`, default 30 days); a "Sign out everywhere" action invalidates every active session; and standard security headers (HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, a baseline CSP) are sent on every response. Existing password-only deployments keep working unchanged.
+
+## [0.6.4] - 2026-07-24
+
+### Fixed
+- Replace now works on watch activities whose FIT file contains a non-UTF-8 byte in a string field ([#244](https://github.com/drkostas/hevy2garmin/issues/244)). Some devices (a Garmin Fenix 7 Pro was the first confirmed) write a manufacturer or product name with a byte that isn't valid UTF-8, and fit-tool decoded FIT strings strictly, so a single bad byte raised an error that aborted the entire heart-rate extraction. HR extraction now decodes FIT strings leniently, so the file parses and the heart rate comes through, letting Replace upload a named activity instead of falling back to keeping the watch copy (which showed exercise names as "unknown").
+
+## [0.6.3] - 2026-07-24
+
+### Fixed
+- The Replace watch strategy now extracts heart rate from the watch activity's own recording without an over-strict time window ([#244](https://github.com/drkostas/hevy2garmin/issues/244)). Previously it only kept HR samples that fell inside the Hevy workout window (plus a 3-minute buffer), so a watch activity whose clock differed from the Hevy log by more than a few minutes lost all of its HR and fell back to keeping the watch copy, with exercise names then showing as "unknown". It now takes every heart-rate record from the activity's own file, since that file is a single recording of the workout. When no HR can be extracted, the reason is now logged instead of silently swallowed, so genuine device-specific extraction failures can be diagnosed.
+
+## [0.6.2] - 2026-07-23
+
+### Fixed
+- Credentials with leading or trailing whitespace (a pasted newline is the classic case) no longer break sync ([#257](https://github.com/drkostas/hevy2garmin/issues/257)). The Hevy API key, Garmin email and password are normalized on read, so a stray newline can't break the API call and an existing bad value already stored in the database is cleaned automatically on the next load. On the Vercel deploy the stored value takes precedence over the environment variable, so this also fixes the case where a bad key couldn't be cleared by editing the env var.
+
 ## [0.6.1] - 2026-07-23
 
 ### Added
