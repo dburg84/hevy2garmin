@@ -1498,6 +1498,46 @@ def _schedules_context(
     }
 
 
+# Timestamp cache for the page-load routine reconciliation, kept in the app_config KV
+# store (like ratelimit's cooldown) so it survives serverless restarts. The reconcile
+# *result* is the synced_routines.status column itself — this only throttles the check.
+_ROUTINE_RECONCILE_KEY = "routine_reconcile"
+_ROUTINE_RECONCILE_TTL = 300  # seconds
+
+
+def _reconcile_routines_best_effort(store, config: dict) -> None:
+    """Refresh "does the Garmin workout still exist" state, at most every TTL.
+
+    Best-effort by design: any failure (no Garmin auth, rate-limit cooldown, network)
+    leaves the DB state untouched and the page renders from it.
+    """
+    try:
+        from hevy2garmin._isotime import parse_iso
+        from hevy2garmin.garmin import get_client, list_workouts
+        from hevy2garmin.reconcile import reconcile_missing_routine_workouts
+
+        state = store.get_app_config(_ROUTINE_RECONCILE_KEY) or {}
+        if state.get("checked_at"):
+            age = (datetime.now(timezone.utc) - parse_iso(state["checked_at"])).total_seconds()
+            if age < _ROUTINE_RECONCILE_TTL:
+                return
+        if cooldown_remaining(store) > 0:
+            return
+        if not any(r.get("garmin_workout_id") for r in store.list_synced_routines()):
+            return  # nothing to check — don't even authenticate
+        client = get_client(
+            config.get("garmin_email"), config.get("garmin_password", ""),
+            config.get("garmin_token_dir", "~/.garminconnect"),
+        )
+        reconcile_missing_routine_workouts(store, list_workouts(client, limit=999))
+        store.set_app_config(
+            _ROUTINE_RECONCILE_KEY,
+            {"checked_at": datetime.now(timezone.utc).isoformat()},
+        )
+    except Exception:
+        logger.debug("routine reconcile on page load skipped", exc_info=True)
+
+
 @app.get("/routines", response_class=HTMLResponse)
 async def routines_page(request: Request):
     """List Hevy routines and their sync status."""
@@ -1513,9 +1553,10 @@ async def routines_page(request: Request):
         schedules = {"scheduled_workouts": [], "page": 1, "total_pages": 1, "sched_total": 0}
     try:
         from hevy2garmin.hevy import HevyClient
-        from hevy2garmin.sync import fetch_all_routines, _cache_routines_total
+        from hevy2garmin.sync import fetch_all_routines, _cache_routines_total, routine_payload_hash
 
         _db = db.get_db()
+        _reconcile_routines_best_effort(_db, config)
         hevy = HevyClient(api_key=config.get("hevy_api_key"))
         all_routines = fetch_all_routines(hevy)
         _cache_routines_total(_db, len(all_routines))
@@ -1528,12 +1569,23 @@ async def routines_page(request: Request):
                 }
                 for ex in (r.get("exercises") or [])
             ]
+            # The routine drifted on Hevy since the last sync when the payload it
+            # would produce now no longer hashes to what we synced. Legacy rows with
+            # no stored hash count as drifted — a sync would recreate them too.
+            needs_update = False
+            if record is not None:
+                try:
+                    needs_update = record.get("content_hash") != routine_payload_hash(r, config)
+                except Exception:
+                    logger.debug("Could not hash routine %s", r.get("id"), exc_info=True)
             routines.append({
                 "id": r.get("id", ""),
                 "title": r.get("title") or r.get("name") or "Routine",
                 "exercises": exercises,
                 "exercise_count": len(exercises),
                 "synced": record is not None,
+                "needs_update": needs_update,
+                "missing": (record or {}).get("status") == "missing_on_garmin",
                 "scheduled_date": (record or {}).get("scheduled_date"),
             })
     except Exception:
@@ -1546,6 +1598,7 @@ async def routines_page(request: Request):
         "total": total,
         "synced": synced,
         "pending": max(0, total - synced),
+        "needs_update": sum(1 for r in routines if r["needs_update"]),
         "scheduled": sum(1 for r in routines if r["scheduled_date"]),
         "pct": round(synced / total * 100) if total else 0,
     }

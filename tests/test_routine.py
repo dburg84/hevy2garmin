@@ -252,11 +252,14 @@ class TestSyncRoutines:
         hevy.get_routines.return_value = {"routines": routines, "page_count": 1}
         create_mock = MagicMock(return_value=777)
         schedule_mock = MagicMock()
-        # patches[7] stubs list_workouts (the pre-create library reconciliation). It
-        # returns an empty library by default — no orphans — so it's a no-op for tests
-        # that don't exercise reconciliation, and it keeps the real list_workouts (with
-        # its 1s rate-limit sleep) out of every sync test. Tests that need orphans swap
-        # in their own list mock, the same way delete_workout (patches[5]) is overridden.
+        # patches[7] stubs list_workouts (the pre-create library reconciliation and the
+        # missing-workout check). It returns the ids these tests conventionally track
+        # (555) and create (777) — an EMPTY library would now mean "the user deleted
+        # everything on Garmin" and flag every tracked routine missing. The entries
+        # carry no ROUTINE_DESC_MARKER, so the orphan-delete path stays inert. It also
+        # keeps the real list_workouts (with its 1s rate-limit sleep) out of every sync
+        # test. Tests that need orphans swap in their own list mock, the same way
+        # delete_workout (patches[5]) is overridden.
         patches = [
             patch.object(sync_module, "load_config", return_value={
                 "hevy_api_key": "k", "garmin_email": "e", "garmin_password": "p"}),
@@ -266,7 +269,10 @@ class TestSyncRoutines:
             patch.object(sync_module, "create_workout", create_mock),
             patch.object(sync_module, "delete_workout", MagicMock()),
             patch.object(sync_module, "schedule_workout", schedule_mock),
-            patch.object(sync_module, "list_workouts", MagicMock(return_value=[])),
+            patch.object(sync_module, "list_workouts", MagicMock(return_value=[
+                {"workoutId": 555, "workoutName": "Push", "description": ""},
+                {"workoutId": 777, "workoutName": "Push", "description": ""},
+            ])),
         ]
         return store, create_mock, schedule_mock, patches
 
@@ -293,7 +299,7 @@ class TestSyncRoutines:
         assert result["row"] == {
             "id": "r1", "title": "Push",
             "exercises": [{"name": "Bench Press (Barbell)", "sets": 1}],
-            "exercise_count": 1, "synced": True, "scheduled_date": None}
+            "exercise_count": 1, "synced": True, "missing": False, "scheduled_date": None}
         create_mock.assert_called_once()
         assert store.get_synced_routine("r1")["garmin_workout_id"] == "777"
 
@@ -309,6 +315,25 @@ class TestSyncRoutines:
         payload = routine_to_garmin_workout(routine, weight_unit="kilogram", default_rest_seconds=75)
         return workout_content_hash(payload)
 
+    def test_stored_content_hash_matches_routine_payload_hash(self, tmp_path: Path) -> None:
+        # Binds the page badge's hash to the one the sync actually persists: a real
+        # sync runs end-to-end, then routine_payload_hash — fed the same config the
+        # sync loaded (no sync/timing keys → both resolve the defaults through
+        # _hash_inputs) — must reproduce the stored content_hash exactly. If the
+        # config resolution ever diverges between badge and sync, this fails.
+        # Two sets with weight and no explicit rest, so the payload actually
+        # depends on BOTH hash inputs (a rest step lands between the sets).
+        routines = [{"id": "r1", "title": "Push", "updated_at": "2026-01-01T00:00:00Z",
+                     "exercises": [{"title": "Bench Press (Barbell)",
+                                    "sets": [{"type": "normal", "reps": 5, "weight_kg": 60},
+                                             {"type": "normal", "reps": 5, "weight_kg": 60}]}]}]
+        store, _, _, patches = self._patched(tmp_path, routines)
+        cfg = {"hevy_api_key": "k", "garmin_email": "e", "garmin_password": "p"}
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7]:
+            sync_module.sync_routines()
+        stored = store.get_synced_routine("r1")["content_hash"]
+        assert stored == sync_module.routine_payload_hash(routines[0], cfg)
+
     def test_skips_when_hash_unchanged(self, tmp_path: Path) -> None:
         routines = [{"id": "r1", "title": "Push", "updated_at": "2026-01-01T00:00:00Z", "exercises": []}]
         store, create_mock, _, patches = self._patched(tmp_path, routines)
@@ -319,6 +344,33 @@ class TestSyncRoutines:
         assert result["skipped"] == 1
         assert result["created"] == 0
         create_mock.assert_not_called()
+
+    def test_missing_on_garmin_recreated_despite_unchanged_hash(self, tmp_path: Path) -> None:
+        # The user deleted the planned workout on Garmin: reconciliation (id 999 is
+        # absent from the stubbed library) flags the row missing, so the sync must
+        # recreate it even though the content hash is unchanged — and must not waste
+        # a delete call on the already-gone workout.
+        routines = [{"id": "r1", "title": "Push", "updated_at": "2026-01-01T00:00:00Z", "exercises": []}]
+        store, create_mock, schedule_mock, patches = self._patched(tmp_path, routines)
+        store.mark_routine_synced("r1", garmin_workout_id="999",
+                                  scheduled_date="2999-01-05",
+                                  content_hash=self._hash_for(routines[0]))
+        store.add_routine_schedule("r1", "old-1", "2999-01-05")
+        schedule_mock.side_effect = lambda _client, _wid, day: f"new-{day}"
+        delete_mock = MagicMock()
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                patch.object(sync_module, "delete_workout", delete_mock), patches[6], patches[7]:
+            result = sync_module.sync_routines()
+        assert result["updated"] == 1
+        assert result["skipped"] == 0
+        create_mock.assert_called_once()
+        delete_mock.assert_not_called()  # 999 is already gone on Garmin
+        record = store.get_synced_routine("r1")
+        assert record["status"] == "success"
+        assert record["garmin_workout_id"] == "777"
+        # The intended schedule survives the deletion and lands on the new workout.
+        schedule_mock.assert_called_once()
+        assert schedule_mock.call_args[0][1:] == (777, "2999-01-05")
 
     def test_resyncs_when_hash_changed(self, tmp_path: Path) -> None:
         routines = [{"id": "r1", "title": "Push", "updated_at": "2026-01-01T00:00:00Z", "exercises": []}]
@@ -381,7 +433,7 @@ class TestSyncRoutines:
         routines = [{"id": "r1", "title": "Push", "updated_at": "2026-01-01T00:00:00Z", "exercises": []}]
         store, create_mock, schedule_mock, patches = self._patched(tmp_path, routines)
         store.mark_routine_synced("r1", garmin_workout_id="555",
-                                  scheduled_date="2026-08-01", content_hash="stale-hash")
+                                  scheduled_date="2999-08-01", content_hash="stale-hash")
         delete_mock = MagicMock()
         with patches[0], patches[1], patches[2], patches[3], patches[4], \
                 patch.object(sync_module, "delete_workout", delete_mock), patches[6], patches[7]:
@@ -391,9 +443,9 @@ class TestSyncRoutines:
         assert result["scheduled"] == 0
         # The new workout (777) is re-scheduled on the stored date...
         schedule_mock.assert_called_once()
-        assert schedule_mock.call_args[0][1:] == (777, "2026-08-01")
+        assert schedule_mock.call_args[0][1:] == (777, "2999-08-01")
         # ...and the date is kept on the record instead of being wiped to None.
-        assert store.get_synced_routine("r1")["scheduled_date"] == "2026-08-01"
+        assert store.get_synced_routine("r1")["scheduled_date"] == "2999-08-01"
 
     def test_resync_restores_all_recurring_dates(self, tmp_path: Path) -> None:
         # A recurring routine booked on 3 dates, then edited: the content-change re-sync
@@ -401,8 +453,8 @@ class TestSyncRoutines:
         routines = [{"id": "r1", "title": "Push", "updated_at": "2026-01-01T00:00:00Z", "exercises": []}]
         store, create_mock, schedule_mock, patches = self._patched(tmp_path, routines)
         store.mark_routine_synced("r1", garmin_workout_id="555",
-                                  scheduled_date="2026-08-03", content_hash="stale-hash")
-        for d in ("2026-08-03", "2026-08-10", "2026-08-17"):
+                                  scheduled_date="2999-08-03", content_hash="stale-hash")
+        for d in ("2999-08-03", "2999-08-10", "2999-08-17"):
             store.add_routine_schedule("r1", f"old-{d}", d)
         schedule_mock.side_effect = lambda _client, _wid, day: f"new-{day}"
         with patches[0], patches[1], patches[2], patches[3], patches[4], \
@@ -411,10 +463,75 @@ class TestSyncRoutines:
         assert result["updated"] == 1
         # All three dates re-booked on the new workout, and tracked with fresh ids.
         assert sorted(c.args[2] for c in schedule_mock.call_args_list) == [
-            "2026-08-03", "2026-08-10", "2026-08-17"]
+            "2999-08-03", "2999-08-10", "2999-08-17"]
         assert set(store.get_routine_schedule_ids("r1")) == {
-            "new-2026-08-03", "new-2026-08-10", "new-2026-08-17"}
-        assert store.get_synced_routine("r1")["scheduled_date"] == "2026-08-03"
+            "new-2999-08-03", "new-2999-08-10", "new-2999-08-17"}
+        assert store.get_synced_routine("r1")["scheduled_date"] == "2999-08-03"
+
+    def test_resync_books_only_future_dates(self, tmp_path: Path) -> None:
+        # A recurring routine with past AND future bookings, re-synced: only the
+        # today-or-future dates are restored — re-booking a past date would plant a
+        # stale planned workout in calendar history.
+        routines = [{"id": "r1", "title": "Push", "updated_at": "2026-01-01T00:00:00Z", "exercises": []}]
+        store, _, schedule_mock, patches = self._patched(tmp_path, routines)
+        store.mark_routine_synced("r1", garmin_workout_id="555",
+                                  scheduled_date="2000-01-01", content_hash="stale-hash")
+        for d in ("2000-01-01", "2999-01-01"):
+            store.add_routine_schedule("r1", f"old-{d}", d)
+        schedule_mock.side_effect = lambda _client, _wid, day: f"new-{day}"
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                patch.object(sync_module, "delete_workout", MagicMock()), patches[6], patches[7]:
+            result = sync_module.sync_routines()
+        assert result["updated"] == 1
+        schedule_mock.assert_called_once()
+        assert schedule_mock.call_args[0][1:] == (777, "2999-01-01")
+        assert store.get_routine_scheduled_dates("r1") == ["2999-01-01"]
+        assert store.get_synced_routine("r1")["scheduled_date"] == "2999-01-01"
+
+    def test_resync_prunes_when_all_dates_past(self, tmp_path: Path) -> None:
+        # Every prior booking is in the past: nothing is re-booked and the orphaned
+        # schedule rows are pruned (the old workout's entries cascaded away on Garmin).
+        routines = [{"id": "r1", "title": "Push", "updated_at": "2026-01-01T00:00:00Z", "exercises": []}]
+        store, _, schedule_mock, patches = self._patched(tmp_path, routines)
+        store.mark_routine_synced("r1", garmin_workout_id="555",
+                                  scheduled_date="2000-01-01", content_hash="stale-hash")
+        for d in ("2000-01-01", "2000-01-08"):
+            store.add_routine_schedule("r1", f"old-{d}", d)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                patch.object(sync_module, "delete_workout", MagicMock()), patches[6], patches[7]:
+            result = sync_module.sync_routines()
+        assert result["updated"] == 1
+        schedule_mock.assert_not_called()
+        assert store.get_routine_schedule_ids("r1") == []
+        record = store.get_synced_routine("r1")
+        assert record["status"] == "success"
+        assert record["scheduled_date"] is None
+
+    def test_explicit_schedule_date_not_filtered(self, tmp_path: Path) -> None:
+        # An explicit schedule_date is the caller's choice and is booked verbatim,
+        # even in the past — only restored dates go through the future-only filter.
+        routines = [{"id": "r1", "title": "Push", "updated_at": "2026-01-01T00:00:00Z", "exercises": []}]
+        store, _, schedule_mock, patches = self._patched(tmp_path, routines)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7]:
+            result = sync_module.sync_routines(schedule_date="2000-01-02")
+        assert result["scheduled"] == 1
+        schedule_mock.assert_called_once()
+        assert schedule_mock.call_args[0][1:] == (777, "2000-01-02")
+        assert store.get_synced_routine("r1")["scheduled_date"] == "2000-01-02"
+
+    def test_legacy_scheduled_date_fallback_filtered(self, tmp_path: Path) -> None:
+        # A legacy row (single scheduled_date, no routine_schedules entries) whose date
+        # is in the past: nothing is re-booked and the record's date resets to None.
+        routines = [{"id": "r1", "title": "Push", "updated_at": "2026-01-01T00:00:00Z", "exercises": []}]
+        store, _, schedule_mock, patches = self._patched(tmp_path, routines)
+        store.mark_routine_synced("r1", garmin_workout_id="555",
+                                  scheduled_date="2000-01-01", content_hash="stale-hash")
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                patch.object(sync_module, "delete_workout", MagicMock()), patches[6], patches[7]:
+            result = sync_module.sync_routines()
+        assert result["updated"] == 1
+        schedule_mock.assert_not_called()
+        assert store.get_synced_routine("r1")["scheduled_date"] is None
 
     def test_schedule_records_calendar_entry(self, tmp_path: Path) -> None:
         # A first sync with an explicit date books the Garmin calendar and records the
@@ -423,7 +540,7 @@ class TestSyncRoutines:
         store, _, schedule_mock, patches = self._patched(tmp_path, routines)
         schedule_mock.return_value = 2001
         with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7]:
-            result = sync_module.sync_routines(schedule_date="2026-08-01")
+            result = sync_module.sync_routines(schedule_date="2999-08-01")
         assert result["scheduled"] == 1
         assert store.get_routine_schedule_ids("r1") == ["2001"]
 
@@ -436,7 +553,7 @@ class TestSyncRoutines:
         schedule_mock.side_effect = RuntimeError("Garmin 429")
 
         with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7]:
-            first = sync_module.sync_routines(schedule_date="2026-08-01")
+            first = sync_module.sync_routines(schedule_date="2999-08-01")
 
         # The schedule failed, but the created workout is tracked (not orphaned).
         assert first["failed"] == 1
@@ -460,7 +577,7 @@ class TestSyncRoutines:
         delete_mock.assert_called_once_with(delete_mock.call_args[0][0], "777")
         final = store.get_synced_routine("r1")
         assert final["status"] == "success"
-        assert final["scheduled_date"] == "2026-08-01"
+        assert final["scheduled_date"] == "2999-08-01"
 
     def test_reconciles_marked_orphan_from_garmin_library(self, tmp_path: Path) -> None:
         # #3: the DB has no record (it was reset while the Garmin workout survived, or a
@@ -856,6 +973,176 @@ class TestRoutineSyncUI:
         with db_patch, client, patch.object(srv, "is_demo_mode", return_value=True):
             resp = client.post("/api/routines/r1/sync")
         assert "demo mode" in resp.text
+
+
+class TestRoutinesPageUI:
+    """GET /routines — the 'Updated on Hevy' drift badge."""
+
+    def _client(self, store: SQLiteDatabase):
+        srv._is_configured_cache = True  # skip the "not configured → /setup" redirect
+        return patch.object(srv.db, "get_db", return_value=store), TestClient(srv.app)
+
+    _ROUTINE = {"id": "r1", "title": "Push", "updated_at": "2026-01-01T00:00:00Z",
+                "exercises": [{"title": "Bench Press (Barbell)",
+                               "sets": [{"type": "normal", "reps": 5, "weight_kg": 60}]}]}
+
+    def _get_routines_page(self, store: SQLiteDatabase, routine: dict) -> str:
+        db_patch, client = self._client(store)
+        hevy = MagicMock()
+        hevy.get_routines.return_value = {"routines": [routine], "page_count": 1}
+        # get_client raises so the page-load reconcile degrades to the DB state —
+        # these tests exercise the drift badge, not the Garmin listing.
+        with db_patch, client, \
+                patch.object(srv, "load_config", return_value={"hevy_api_key": "k"}), \
+                patch("hevy2garmin.hevy.HevyClient", return_value=hevy), \
+                patch("hevy2garmin.garmin.get_client",
+                      side_effect=RuntimeError("no garmin in these tests")):
+            return client.get("/routines").text
+
+    def test_badge_shown_when_routine_drifted(self, tmp_path: Path) -> None:
+        store = SQLiteDatabase(tmp_path / "ui.db")
+        store.mark_routine_synced("r1", garmin_workout_id="555", content_hash="stale-hash")
+        html = self._get_routines_page(store, dict(self._ROUTINE))
+        assert "Updated on Hevy" in html
+        assert ">Update<" in html  # the sync button relabels
+        assert "changed on Hevy" in html  # sync-bar subtitle counts it
+
+    def test_badge_absent_when_hash_matches(self, tmp_path: Path) -> None:
+        store = SQLiteDatabase(tmp_path / "ui.db")
+        current = sync_module.routine_payload_hash(dict(self._ROUTINE), {"hevy_api_key": "k"})
+        store.mark_routine_synced("r1", garmin_workout_id="555", content_hash=current)
+        html = self._get_routines_page(store, dict(self._ROUTINE))
+        assert "Updated on Hevy" not in html
+        assert ">Re-sync<" in html
+
+    def test_badge_absent_when_never_synced(self, tmp_path: Path) -> None:
+        store = SQLiteDatabase(tmp_path / "ui.db")
+        html = self._get_routines_page(store, dict(self._ROUTINE))
+        assert "Updated on Hevy" not in html
+        assert "Not synced" in html
+
+    def test_legacy_row_without_hash_counts_as_drifted(self, tmp_path: Path) -> None:
+        # Rows synced before content hashing have no stored hash; a sync would
+        # recreate them, so the badge must agree and show.
+        store = SQLiteDatabase(tmp_path / "ui.db")
+        store.mark_routine_synced("r1", garmin_workout_id="555")
+        html = self._get_routines_page(store, dict(self._ROUTINE))
+        assert "Updated on Hevy" in html
+
+    def test_hash_failure_degrades_to_no_badge(self, tmp_path: Path) -> None:
+        # A routine the payload builder can't process must not break the page.
+        store = SQLiteDatabase(tmp_path / "ui.db")
+        store.mark_routine_synced("r1", garmin_workout_id="555", content_hash="stale-hash")
+        db_patch, client = self._client(store)
+        hevy = MagicMock()
+        hevy.get_routines.return_value = {"routines": [dict(self._ROUTINE)], "page_count": 1}
+        with db_patch, client, \
+                patch.object(srv, "load_config", return_value={"hevy_api_key": "k"}), \
+                patch("hevy2garmin.hevy.HevyClient", return_value=hevy), \
+                patch("hevy2garmin.garmin.get_client",
+                      side_effect=RuntimeError("no garmin in these tests")), \
+                patch("hevy2garmin.sync.routine_to_garmin_workout",
+                      side_effect=RuntimeError("bad routine")):
+            html = client.get("/routines").text
+        assert "Updated on Hevy" not in html
+        assert "✓ Synced" in html
+
+    def test_payload_hash_matches_sync_internal_hash(self) -> None:
+        # The page badge and _sync_one_routine's skip check must never disagree:
+        # same routine + default config → identical hash string.
+        routine = dict(self._ROUTINE)
+        expected = workout_content_hash(
+            routine_to_garmin_workout(routine, weight_unit="kilogram", default_rest_seconds=75)
+        )
+        assert sync_module.routine_payload_hash(routine, {}) == expected
+
+
+class TestRoutinesReconcileUI:
+    """GET /routines — page-load reconciliation of workouts deleted on Garmin."""
+
+    _ROUTINE = {"id": "r1", "title": "Push", "updated_at": "2026-01-01T00:00:00Z",
+                "exercises": []}
+
+    def _client(self, store: SQLiteDatabase):
+        srv._is_configured_cache = True  # skip the "not configured → /setup" redirect
+        return patch.object(srv.db, "get_db", return_value=store), TestClient(srv.app)
+
+    def _patches(self, garmin_library: list[dict]):
+        """Patch the collaborators routines_page imports lazily (at their source
+        modules) — Hevy returns one routine, Garmin returns ``garmin_library``."""
+        hevy = MagicMock()
+        hevy.get_routines.return_value = {"routines": [dict(self._ROUTINE)], "page_count": 1}
+        get_client_mock = MagicMock(return_value=MagicMock())
+        list_mock = MagicMock(return_value=garmin_library)
+        return (
+            patch.object(srv, "load_config", return_value={"hevy_api_key": "k",
+                                                           "garmin_email": "e"}),
+            patch("hevy2garmin.hevy.HevyClient", return_value=hevy),
+            patch("hevy2garmin.garmin.get_client", get_client_mock),
+            patch("hevy2garmin.garmin.list_workouts", list_mock),
+            get_client_mock,
+            list_mock,
+        )
+
+    def test_deleted_workout_shows_removed_badge(self, tmp_path: Path) -> None:
+        store = SQLiteDatabase(tmp_path / "ui.db")
+        store.mark_routine_synced("r1", garmin_workout_id="555", title="Push")
+        db_patch, client = self._client(store)
+        cfg, hevy_p, client_p, list_p, _, _ = self._patches(garmin_library=[
+            {"workoutId": 999, "workoutName": "Other", "description": ""}])
+        with db_patch, client, cfg, hevy_p, client_p, list_p:
+            html = client.get("/routines").text
+        assert "Removed on Garmin" in html
+        assert "✓ Synced" not in html
+        assert "Re-create" in html
+        assert "Re-sync first" in html  # Schedule button disabled with the hint
+        assert store.get_synced_routine("r1")["status"] == "missing_on_garmin"
+
+    def test_reconcile_is_throttled_by_ttl(self, tmp_path: Path) -> None:
+        store = SQLiteDatabase(tmp_path / "ui.db")
+        store.mark_routine_synced("r1", garmin_workout_id="555", title="Push")
+        db_patch, client = self._client(store)
+        cfg, hevy_p, client_p, list_p, _, list_mock = self._patches(garmin_library=[
+            {"workoutId": 555, "workoutName": "Push", "description": ""}])
+        with db_patch, client, cfg, hevy_p, client_p, list_p:
+            client.get("/routines")
+            client.get("/routines")
+        list_mock.assert_called_once()
+
+    def test_rate_limit_cooldown_skips_garmin(self, tmp_path: Path) -> None:
+        from hevy2garmin.ratelimit import record_rate_limit
+
+        store = SQLiteDatabase(tmp_path / "ui.db")
+        store.mark_routine_synced("r1", garmin_workout_id="555", title="Push")
+        record_rate_limit(store)  # active cooldown → don't even authenticate
+        db_patch, client = self._client(store)
+        cfg, hevy_p, client_p, list_p, get_client_mock, _ = self._patches(garmin_library=[])
+        with db_patch, client, cfg, hevy_p, client_p, list_p:
+            html = client.get("/routines").text
+        get_client_mock.assert_not_called()
+        # Page renders from the DB state untouched.
+        assert "✓ Synced" in html
+
+    def test_garmin_failure_degrades_to_db_state(self, tmp_path: Path) -> None:
+        store = SQLiteDatabase(tmp_path / "ui.db")
+        store.mark_routine_synced("r1", garmin_workout_id="555", title="Push")
+        db_patch, client = self._client(store)
+        cfg, hevy_p, client_p, list_p, get_client_mock, _ = self._patches(garmin_library=[])
+        get_client_mock.side_effect = RuntimeError("no auth")
+        with db_patch, client, cfg, hevy_p, client_p, list_p:
+            resp = client.get("/routines")
+        assert resp.status_code == 200
+        assert "✓ Synced" in resp.text
+        assert store.get_synced_routine("r1")["status"] == "success"
+
+    def test_no_tracked_workouts_skips_garmin_entirely(self, tmp_path: Path) -> None:
+        store = SQLiteDatabase(tmp_path / "ui.db")  # nothing synced
+        db_patch, client = self._client(store)
+        cfg, hevy_p, client_p, list_p, get_client_mock, _ = self._patches(garmin_library=[])
+        with db_patch, client, cfg, hevy_p, client_p, list_p:
+            resp = client.get("/routines")
+        assert resp.status_code == 200
+        get_client_mock.assert_not_called()
 
 
 class TestDbFacade:
