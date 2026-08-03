@@ -11,8 +11,8 @@ TEMPLATE_TO_GARMIN: dict[str, tuple[int, int]] = {
     "3BC06AD3": (7, 3),  # 21s Bicep Curl
     "B4F2FF72": (5, 49),  # Ab Scissors
     "99D5F10E": (5, 18),  # Ab Wheel
-    "5E0DDACE": (2, 0),  # Aerobics
-    "43573BB8": (41, 0),  # Air Bike
+    "5E0DDACE": (2, 65535),  # Aerobics
+    "43573BB8": (2, 65535),  # Air Bike
     "A69FF221": (24, 1),  # Arnold Press (Dumbbell)
     "D4A2FE7E": (14, 32),  # Around The World
     "5BFF35BA": (28, 47),  # Assisted Pistol Squats
@@ -21,7 +21,7 @@ TEMPLATE_TO_GARMIN: dict[str, tuple[int, int]] = {
     "091737FA": (13, 26),  # Back Extension (Weighted Hyperextension)
     "F51D9080": (20, 25),  # Ball Slams
     "E8D86EE8": (9, 5),  # Band Pullaparts
-    "084A67CA": (38, 0),  # Battle Ropes
+    "084A67CA": (2, 65535),  # Battle Ropes
     "DDB29047": (7, 4),  # Behind the Back Bicep Wrist Curl (Barbell)
     "2DBCA395": (7, 7),  # Behind the Back Curl (Cable)
     "3D1CDC75": (28, 61),  # Belt Squat (Machine)
@@ -33,7 +33,7 @@ TEMPLATE_TO_GARMIN: dict[str, tuple[int, int]] = {
     "35B51B87": (0, 4),  # Bench Press - Close Grip (Barbell)
     "E644F828": (0, 25),  # Bench Press - Wide Grip (Barbell)
     "EA820646": (23, 0),  # Bent Over Row (Band)
-    "55E6546F": (23, 46),  # Bent Over Row (Barbell)
+    "55E6546F": (23, 65535),  # Bent Over Row (Barbell)
     "23E92538": (23, 2),  # Bent Over Row (Dumbbell)
     "A5AC6449": (7, 3),  # Bicep Curl (Barbell)
     "ADA8623C": (7, 8),  # Bicep Curl (Cable)
@@ -45,7 +45,7 @@ TEMPLATE_TO_GARMIN: dict[str, tuple[int, int]] = {
     "BD0AD077": (11, 1),  # Bird Dog
     "56092DD1": (20, 13),  # Box Jump
     "38FC1AB9": (28, 7),  # Box Squat (Barbell)
-    "A0D8FA1B": (2, 42),  # Boxing
+    "A0D8FA1B": (2, 65535),  # Boxing
     "B5D3A742": (17, 7),  # Bulgarian Split Squat
     "BB792A36": (29, 0),  # Burpee
     "86B00DDE": (29, 0),  # Burpee Over the Bar
@@ -65,8 +65,8 @@ TEMPLATE_TO_GARMIN: dict[str, tuple[int, int]] = {
     "78683336": (9, 2),  # Chest Fly (Machine)
     "720B0D70": (9, 2),  # Chest Fly (Suspension)
     "EAC7D9C5": (0, 1),  # Chest Press (Band)
-    "7EB3F7C3": (0, 6),  # Chest Press (Machine)
-    "914F3A96": (23, 40),  # Chest Supported Incline Row (Dumbbell)
+    "7EB3F7C3": (0, 22),  # Chest Press (Machine)
+    "914F3A96": (23, 2),  # Chest Supported Incline Row (Dumbbell)
     "B582299E": (9, 5),  # Chest Supported Reverse Fly (Dumbbell)
     "F21D5693": (14, 10),  # Chest Supported Y Raise (Dumbbell)
     "29083183": (21, 3),  # Chin Up
@@ -78,14 +78,14 @@ TEMPLATE_TO_GARMIN: dict[str, tuple[int, int]] = {
     "9E09CEC3": (18, 5),  # Clean and Jerk
     "D3095577": (18, 5),  # Clean and Press
     "652FEA39": (18, 11),  # Clean Pull
-    "E23F1F2B": (2, 0),  # Climbing
+    "E23F1F2B": (2, 65535),  # Climbing
     "724CDE60": (7, 37),  # Concentration Curl
     "32C4D4A2": (7, 12),  # Cross Body Hammer Curl
     "DCF3B31B": (6, 83),  # Crunch
     "EB43ADD4": (6, 28),  # Crunch (Machine)
     "D928C232": (6, 79),  # Crunch (Weighted)
     "D39EC9EB": (17, 21),  # Curtsy Lunge (Dumbbell)
-    "D8F7F851": (33, 0),  # Cycling
+    "D8F7F851": (2, 65535),  # Cycling
     "D8911FC4": (11, 1),  # Dead Bug
     "B9380898": (21, 38),  # Dead Hang
     "99507114": (8, 0),  # Deadlift (Band)
@@ -103,7 +103,7 @@ TEMPLATE_TO_GARMIN: dict[str, tuple[int, int]] = {
     "B2398CD1": (6, 79),  # Decline Crunch (Weighted)
     "C43825EA": (22, 13),  # Decline Push Up
     "6575F52D": (22, 15),  # Diamond Push Up
-    "7DA843A3": (31, 0),  # Downward Dog
+    "7DA843A3": (31, 65535),  # Downward Dog
     "D950429E": (7, 3),  # Drag Curl
     "AFC29472": (16, 1),  # Dragon Flag
     "B7192800": (16, 1),  # Dragonfly
@@ -112,7 +112,7 @@ TEMPLATE_TO_GARMIN: dict[str, tuple[int, int]] = {
     "F72FA239": (0, 6),  # Dumbbell Squeeze Press
     "BF6ECE89": (28, 32),  # Dumbbell Step Up
     "A01BE509": (27, 37),  # Elbow to Knee
-    "3303376C": (39, 0),  # Elliptical Trainer
+    "3303376C": (2, 65535),  # Elliptical Trainer
     "01A35BF9": (7, 19),  # EZ Bar Biceps Curl
     "BE640BA0": (23, 5),  # Face Pull
     "50C613D0": (3, 1),  # Farmers Walk
@@ -154,10 +154,10 @@ TEMPLATE_TO_GARMIN: dict[str, tuple[int, int]] = {
     "567FB505": (6, 83),  # Heel Taps
     "BE89C631": (0, 6),  # Hex Press (Dumbbell)
     "C9CCB878": (20, 3),  # High Knee Skips
-    "150E076B": (2, 0),  # High Knees
-    "023947AB": (2, 0),  # HIIT
+    "150E076B": (2, 65535),  # High Knees
+    "023947AB": (2, 65535),  # HIIT
     "1C34A172": (32, 1),  # Hiking
-    "F4B4C6EE": (11, 28),  # Hip Abduction (Machine)
+    "F4B4C6EE": (11, 29),  # Hip Abduction (Machine)
     "8BEBFED6": (11, 25),  # Hip Adduction (Machine)
     "92B8C7E1": (10, 0),  # Hip Thrust
     "D57C2EC7": (10, 1),  # Hip Thrust (Barbell)
@@ -238,7 +238,7 @@ TEMPLATE_TO_GARMIN: dict[str, tuple[int, int]] = {
     "DBE341AA": (6, 83),  # Oblique Crunch
     "B140095E": (22, 38),  # One Arm Push Up
     "582ADA23": (7, 8),  # Overhead Curl (Cable)
-    "4C6721B9": (3, 4),  # Overhead Dumbbell Lunge
+    "4C6721B9": (17, 40),  # Overhead Dumbbell Lunge
     "54E60954": (14, 16),  # Overhead Plate Raise
     "7B8D84E8": (24, 14),  # Overhead Press (Barbell)
     "6AC96645": (24, 15),  # Overhead Press (Dumbbell)
@@ -247,10 +247,10 @@ TEMPLATE_TO_GARMIN: dict[str, tuple[int, int]] = {
     "B5EFBF9C": (30, 5),  # Overhead Triceps Extension (Cable)
     "FBEE8279": (10, 0),  # Partial Glute Bridge (Barbell)
     "CE1054CE": (28, 6),  # Pause Squat (Barbell)
-    "018ADC12": (23, 46),  # Pendlay Row (Barbell)
+    "018ADC12": (23, 65535),  # Pendlay Row (Barbell)
     "30E293E3": (28, 61),  # Pendulum Squat (Machine)
     "0EFE8162": (22, 49),  # Pike Pushup
-    "EC2510CD": (2, 0),  # Pilates
+    "EC2510CD": (2, 65535),  # Pilates
     "942BAD12": (7, 12),  # Pinwheel Curl (Dumbbell)
     "3FF6A22E": (28, 47),  # Pistol Squat
     "C6C9B8A0": (19, 43),  # Plank
@@ -300,7 +300,7 @@ TEMPLATE_TO_GARMIN: dict[str, tuple[int, int]] = {
     "72CFFAD5": (8, 4),  # Romanian Deadlift (Dumbbell)
     "234897AB": (7, 8),  # Rope Cable Curl
     "9273BA17": (21, 20),  # Rope Straight Arm Pulldown
-    "0222DB42": (42, 0),  # Rowing Machine
+    "0222DB42": (2, 65535),  # Rowing Machine
     "AC1BB830": (32, 0),  # Running
     "BB83BDDE": (5, 46),  # Russian Twist (Bodyweight)
     "2982AA23": (5, 46),  # Russian Twist (Weighted)
@@ -354,17 +354,17 @@ TEMPLATE_TO_GARMIN: dict[str, tuple[int, int]] = {
     "F5DEF1EB": (28, 62),  # Sissy Squat (Weighted)
     "022DF610": (27, 37),  # Sit Up
     "9237BA12": (27, 34),  # Sit Up (Weighted)
-    "24A809EF": (2, 0),  # Skating
-    "84325755": (2, 0),  # Skiing
+    "24A809EF": (2, 65535),  # Skating
+    "84325755": (2, 65535),  # Skiing
     "875F585F": (30, 13),  # Skullcrusher (Barbell)
     "68F8A292": (30, 7),  # Skullcrusher (Dumbbell)
     "7757171F": (20, 29),  # Sled Push
     "FB09C938": (18, 9),  # Snatch
-    "911A58D3": (2, 0),  # Snowboarding
+    "911A58D3": (2, 65535),  # Snowboarding
     "2348AB72": (7, 3),  # Spider Curl (Barbell)
     "90427D4A": (7, 37),  # Spider Curl (Dumbbell)
     "C10A5AC9": (19, 90),  # Spiderman
-    "213AB238": (41, 3),  # Spinning
+    "213AB238": (2, 65535),  # Spinning
     "E764B907": (18, 10),  # Split Jerk
     "20C1A3CB": (17, 28),  # Split Squat (Dumbbell)
     "9283BABA": (32, 3),  # Sprints
@@ -376,8 +376,8 @@ TEMPLATE_TO_GARMIN: dict[str, tuple[int, int]] = {
     "DDCC3821": (28, 6),  # Squat (Smith Machine)
     "B82D6418": (28, 61),  # Squat (Suspension)
     "A8814C06": (23, 18),  # Squat Row
-    "4377A52B": (47, 0),  # Stair Machine (Floors)
-    "4377A52C": (47, 0),  # Stair Machine (Steps)
+    "4377A52B": (2, 65535),  # Stair Machine (Floors)
+    "4377A52C": (2, 65535),  # Stair Machine (Steps)
     "ACB2751D": (11, 30),  # Standing Cable Glute Kickbacks
     "06745E58": (1, 18),  # Standing Calf Raise
     "E53CCBE5": (1, 17),  # Standing Calf Raise (Barbell)
@@ -390,21 +390,21 @@ TEMPLATE_TO_GARMIN: dict[str, tuple[int, int]] = {
     "EE2938D1": (21, 38),  # Sternum Pull up (Gironda)
     "D2387AB1": (21, 20),  # Straight Arm Lat Pulldown (Cable)
     "2A48E443": (8, 1),  # Straight Leg Deadlift
-    "527DA061": (31, 0),  # Stretching
+    "527DA061": (31, 65535),  # Stretching
     "D20D7BBE": (8, 15),  # Sumo Deadlift
     "3F5F8D40": (28, 69),  # Sumo Squat
     "6622E5A0": (28, 69),  # Sumo Squat (Barbell)
     "05293BCA": (28, 69),  # Sumo Squat (Dumbbell)
     "5E10D0E6": (28, 69),  # Sumo Squat (Kettlebell)
     "218DA87C": (13, 29),  # Superman
-    "B60A678F": (2, 0),  # Swimming
+    "B60A678F": (2, 65535),  # Swimming
     "08A2974E": (23, 28),  # T Bar Row
     "90E506D5": (28, 79),  # Thruster (Barbell)
     "10313AFD": (28, 79),  # Thruster (Kettlebell)
     "75BAC5C3": (27, 37),  # Toe Touch
     "B94E35E1": (6, 81),  # Toes to Bar
     "FBB62888": (4, 2),  # Torso Rotation
-    "243710DE": (52, 1),  # Treadmill
+    "243710DE": (2, 65535),  # Treadmill
     "28BB4A95": (30, 2),  # Triceps Dip
     "4B4BF8C2": (30, 2),  # Triceps Dip (Assisted)
     "10347BAC": (30, 40),  # Triceps Dip (Weighted)
@@ -429,11 +429,11 @@ TEMPLATE_TO_GARMIN: dict[str, tuple[int, int]] = {
     "A733CC5B": (17, 77),  # Walking Lunge (Dumbbell)
     "A1F47ACC": (28, 83),  # Wall Ball
     "C8706C80": (28, 20),  # Wall Sit
-    "79EF4E4F": (31, 0),  # Warm Up
+    "79EF4E4F": (31, 65535),  # Warm Up
     "7C50F118": (21, 26),  # Wide Pull Up
     "B31EB524": (30, 15),  # Wide-Elbow Triceps Press (Dumbbell)
     "0E4523F4": (7, 18),  # Wrist Roller
-    "8C9D2928": (36, 0),  # Yoga
+    "8C9D2928": (29, 65535),  # Yoga
     "40C6A9FC": (28, 86),  # Zercher Squat
     "123EE239": (7, 42),  # Zottman Curl (Dumbbell)
 }
