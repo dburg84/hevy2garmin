@@ -68,7 +68,7 @@ def _cache_routines_total(store: Any, count: int) -> None:
 class SyncOneResult:
     """Outcome of syncing a single Hevy workout."""
 
-    status: str  # "synced" | "dry_run" | "deferred" | "processing" | "needs_review" | "failed"
+    status: str  # "synced" | "dry_run" | "deferred" | "merge_pending" | "processing" | "needs_review" | "failed"
     activity_id: int | None = None
     sync_method: str = "upload"
     merged: bool = False
@@ -142,6 +142,15 @@ def finalize_pending(store, client, pending: dict) -> SyncOneResult:
                     phase = "needs_review" if attempts >= 3 else "finalizing"
                     store.update_pending(wid, phase=phase, next_step="delete", delete_attempt_count=attempts, last_error=str(exc)[:1000])
                     return SyncOneResult(status="needs_review" if phase == "needs_review" else "processing", activity_id=activity_id)
+                # Remove it from intervals.icu too, so the deleted watch copy
+                # doesn't linger there as a duplicate of the named activity
+                # that replaces it. No-op unless ICU credentials are set, and
+                # never raises — a failure here must not fail the sync.
+                workout_start = (payload.get("workout") or {}).get("start_time", "")
+                if workout_start:
+                    from hevy2garmin.intervals_icu import try_delete_icu_activity
+
+                    try_delete_icu_activity(int(watch_id), workout_start)
                 step = "commit"
                 store.update_pending(wid, next_step=step, last_error=None)
         _complete(store, wid, payload, activity_id)
@@ -288,12 +297,18 @@ def sync_one_workout(
     dry_run: bool = False,
     force_upload: bool = False,
     respect_grace: bool = False,
+    merge_only: bool = False,
     database: Any | None = None,
 ) -> SyncOneResult:
     """Sync one Hevy workout to Garmin (merge, FIT upload, or dry-run).
 
     When ``respect_grace`` is True (autosync/cron), too-new workouts return
     ``status="deferred"`` so a watch activity can land before we upload.
+
+    When ``merge_only`` is True (webhook staged retry), a merge attempt that
+    does not land returns ``status="merge_pending"`` instead of falling back
+    to a plain FIT upload, so a later attempt can still merge once the watch
+    activity has reached Garmin Connect.
 
     Raises on FIT generation / upload failures so callers can map errors.
     """
@@ -375,6 +390,17 @@ def sync_one_workout(
         merge_forced_fresh = merge_result.force_fresh_upload
         merge_delete_id = merge_result.delete_after_upload
         merge_fallback = True
+
+        # merge_only: the caller (the webhook retry loop) wants a merge or
+        # nothing. Don't fall back to a plain FIT upload — leave the workout
+        # unsynced so the next attempt can merge once the watch activity has
+        # had more time to reach Garmin Connect.
+        if merge_only and not dry_run:
+            logger.info(
+                "  merge_only: no mergeable Garmin watch activity yet for '%s', will retry",
+                title,
+            )
+            return SyncOneResult(status="merge_pending", merge_fallback=True)
     else:
         merge_fallback = False
 
@@ -741,6 +767,14 @@ def sync(
         logger.warning(
             'Add custom mappings: hevy2garmin map "Exercise Name" --category N --subcategory N'
         )
+
+    # One-line run summary, so the container log shows the outcome even when
+    # nothing synced — a silent run is indistinguishable from a dead one.
+    logger.info(
+        "Sync run complete: %d synced, %d skipped, %d failed, %d deferred, %d processing (of %d fetched)",
+        stats["synced"], stats["skipped"], stats["failed"],
+        stats["deferred"], stats["processing"], stats["total"],
+    )
 
     # Log-only duplicate scan (best-effort; never breaks a sync).
     if not dry_run and garmin_client:
