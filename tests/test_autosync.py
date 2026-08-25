@@ -180,3 +180,128 @@ class TestLifespanAutosync:
     def test_shutdown_cancels_even_when_autosync_disabled(self) -> None:
         _, stopped = self._run({"auto_sync": {"enabled": False}})
         assert stopped == [1]
+
+
+class TestAutosyncLoop:
+    """The loop is an asyncio task (it used to be a chain of threading.Timers),
+    so sleeping, rescheduling and stopping are all driven from the event loop."""
+
+    @staticmethod
+    def _run_loop(returns: list[int | None], sleeps: list[float]) -> None:
+        """Drive _autosync_loop with instant sleeps and canned sync results."""
+        pending = list(returns)
+
+        async def fake_sleep(seconds):
+            sleeps.append(seconds)
+
+        async def fake_threadpool(fn):
+            return pending.pop(0)
+
+        with patch.object(server.asyncio, "sleep", fake_sleep), \
+             patch.object(server, "run_in_threadpool", fake_threadpool):
+            asyncio.run(server._autosync_loop(30))
+
+    def test_sleeps_the_interval_before_first_sync(self) -> None:
+        sleeps: list[float] = []
+        self._run_loop([None], sleeps)
+        assert sleeps == [30 * 60]
+
+    def test_stops_when_sync_returns_none(self) -> None:
+        """None means auto-sync was disabled or the Hevy key is invalid."""
+        sleeps: list[float] = []
+        self._run_loop([None], sleeps)
+        assert len(sleeps) == 1  # did not loop again
+
+    def test_keeps_looping_while_sync_returns_an_interval(self) -> None:
+        sleeps: list[float] = []
+        self._run_loop([30, 30, None], sleeps)
+        assert sleeps == [1800, 1800, 1800]
+
+    def test_picks_up_a_changed_interval(self) -> None:
+        """A new interval from the config applies to the next sleep."""
+        sleeps: list[float] = []
+        self._run_loop([120, None], sleeps)
+        assert sleeps == [30 * 60, 120 * 60]
+
+    def test_cancellation_stops_the_loop(self) -> None:
+        async def scenario():
+            task = asyncio.create_task(server._autosync_loop(60))
+            await asyncio.sleep(0)  # let it reach the first await
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(scenario())
+
+
+def _really_acquire() -> bool:
+    """Stand in for _acquire_sync_lock but take the real lock, so the
+    ``finally: release()`` under test has something to release."""
+    return server._sync_executing.acquire(blocking=False)
+
+
+class TestRunAutosyncOnce:
+    """_run_autosync_once returns the next interval, or None to stop the loop."""
+
+    def test_returns_none_when_disabled(self) -> None:
+        with patch.object(server, "load_config", lambda: {"auto_sync": {"enabled": False}}):
+            assert server._run_autosync_once() is None
+
+    def test_returns_none_when_config_missing(self) -> None:
+        with patch.object(server, "load_config", lambda: {}):
+            assert server._run_autosync_once() is None
+
+    def test_returns_interval_without_syncing_when_lock_held(self) -> None:
+        """A sync already in flight must not be joined, but the loop continues."""
+        cfg = {"auto_sync": {"enabled": True, "interval_minutes": 45}}
+        called = []
+        with patch.object(server, "load_config", lambda: cfg), \
+             patch.object(server, "_acquire_sync_lock", lambda: False), \
+             patch.object(server, "sync", lambda **kw: called.append(kw)):
+            assert server._run_autosync_once() == 45
+        assert called == []
+
+    def test_returns_interval_after_a_successful_sync(self) -> None:
+        cfg = {"auto_sync": {"enabled": True, "interval_minutes": 90}}
+        result = {"synced": 2, "skipped": 0, "failed": 0}
+        with patch.object(server, "load_config", lambda: cfg), \
+             patch.object(server, "_acquire_sync_lock", _really_acquire), \
+             patch.object(server, "sync", lambda **kw: result), \
+             patch.object(server, "_record_sync_log", lambda *a, **k: None):
+            assert server._run_autosync_once() == 90
+        # the lock must be free again for the next run
+        assert server._sync_executing.acquire(blocking=False)
+        server._sync_executing.release()
+
+    def test_releases_lock_when_sync_raises(self) -> None:
+        cfg = {"auto_sync": {"enabled": True, "interval_minutes": 30}}
+
+        def boom(**kw):
+            raise RuntimeError("hevy down")
+
+        with patch.object(server, "load_config", lambda: cfg), \
+             patch.object(server, "_acquire_sync_lock", _really_acquire), \
+             patch.object(server, "sync", boom), \
+             patch.object(server, "_record_sync_log", lambda *a, **k: None):
+            assert server._run_autosync_once() == 30
+        assert server._sync_executing.acquire(blocking=False)
+        server._sync_executing.release()
+
+    def test_stops_loop_when_hevy_key_is_invalid(self) -> None:
+        """A bad key would fail every cycle, so the loop must stop, not spin."""
+        from hevy2garmin.hevy import HevyAuthError
+
+        cfg = {"auto_sync": {"enabled": True, "interval_minutes": 30}}
+        saved: list[dict] = []
+
+        def boom(**kw):
+            raise HevyAuthError("401")
+
+        with patch.object(server, "load_config", lambda: cfg), \
+             patch.object(server, "_acquire_sync_lock", _really_acquire), \
+             patch.object(server, "sync", boom), \
+             patch.object(server, "save_config", saved.append), \
+             patch.object(server.db, "get_database_url", lambda: None), \
+             patch.object(server, "_record_sync_log", lambda *a, **k: None):
+            assert server._run_autosync_once() is None
+        assert saved and saved[0]["auto_sync"]["enabled"] is False
