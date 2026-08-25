@@ -275,7 +275,13 @@ from hevy2garmin.fit import generate_fit
 result = generate_fit(hevy_workout_dict, hr_samples=None, output_path="workout.fit")
 ```
 
-For cloud deployments (Vercel, CI/CD), install with Postgres support:
+For self-hosted installs (Docker, local), the base install is sufficient — SQLite is used automatically with no extra dependencies:
+
+```bash
+pip install hevy2garmin
+```
+
+For cloud deployments (Vercel, CI/CD) that need Postgres support:
 
 ```bash
 pip install hevy2garmin[cloud]
