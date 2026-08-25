@@ -9,6 +9,7 @@ import os
 import re
 import threading
 import time
+from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from html import escape
 from math import ceil
@@ -183,7 +184,28 @@ def _render(template_name: str, **ctx) -> HTMLResponse:
     return HTMLResponse(_apply_prefix(t.render(**ctx), prefix))
 
 
-app = FastAPI(title="hevy2garmin", docs_url=None, redoc_url=None)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Start the auto-sync timer if configured, and cancel it on shutdown.
+
+    The helpers below are defined later in this module; the body only runs at
+    startup, so the names resolve by then.
+    """
+    config = load_config()
+    auto_cfg = config.get("auto_sync", {})
+    if auto_cfg.get("enabled", False):
+        interval = auto_cfg.get("interval_minutes", 30)
+        logger.info("Auto-sync enabled on startup: every %d min", interval)
+        _schedule_autosync(interval)
+    try:
+        yield
+    finally:
+        # Without this a pending timer survives reload/shutdown and can fire a
+        # sync against a half-torn-down process.
+        _stop_autosync()
+
+
+app = FastAPI(title="hevy2garmin", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
@@ -446,17 +468,6 @@ def _get_autosync_status() -> dict[str, Any]:
                 status["next_sync"] = f"in {remaining // 60}h {remaining % 60}m"
 
     return status
-
-
-@app.on_event("startup")
-async def _startup_autosync() -> None:
-    """Start auto-sync timer on server startup if enabled."""
-    config = load_config()
-    auto_cfg = config.get("auto_sync", {})
-    if auto_cfg.get("enabled", False):
-        interval = auto_cfg.get("interval_minutes", 30)
-        logger.info("Auto-sync enabled on startup: every %d min", interval)
-        _schedule_autosync(interval)
 
 
 def client_ip(request: Request) -> str:

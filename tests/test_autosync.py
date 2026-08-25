@@ -138,3 +138,45 @@ class TestBuildSyncWorkflowYaml:
         assert "actions/setup-python@v6" in yml
         assert "actions/checkout@v4" not in yml
         assert "actions/setup-python@v5" not in yml
+
+
+class TestLifespanAutosync:
+    """The startup/shutdown hook lives in the app's lifespan (FastAPI dropped
+    on_event), so it only fires when TestClient is used as a context manager."""
+
+    def _run(self, config: dict) -> tuple[list[int], list[int]]:
+        from fastapi.testclient import TestClient
+
+        scheduled: list[int] = []
+        stopped: list[int] = []
+        with patch.object(server, "load_config", lambda: config), \
+             patch.object(server, "_schedule_autosync", scheduled.append), \
+             patch.object(server, "_stop_autosync", lambda: stopped.append(1)):
+            with TestClient(server.app):
+                pass
+        return scheduled, stopped
+
+    def test_enabled_schedules_configured_interval(self) -> None:
+        scheduled, _ = self._run({"auto_sync": {"enabled": True, "interval_minutes": 45}})
+        assert scheduled == [45]
+
+    def test_enabled_without_interval_defaults_to_30(self) -> None:
+        scheduled, _ = self._run({"auto_sync": {"enabled": True}})
+        assert scheduled == [30]
+
+    def test_disabled_schedules_nothing(self) -> None:
+        scheduled, _ = self._run({"auto_sync": {"enabled": False}})
+        assert scheduled == []
+
+    def test_missing_config_schedules_nothing(self) -> None:
+        scheduled, _ = self._run({})
+        assert scheduled == []
+
+    def test_shutdown_cancels_timer(self) -> None:
+        """A surviving timer could fire a sync against a torn-down process."""
+        _, stopped = self._run({"auto_sync": {"enabled": True, "interval_minutes": 60}})
+        assert stopped == [1]
+
+    def test_shutdown_cancels_even_when_autosync_disabled(self) -> None:
+        _, stopped = self._run({"auto_sync": {"enabled": False}})
+        assert stopped == [1]
