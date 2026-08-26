@@ -1,20 +1,26 @@
-"""Tests for auto-sync helpers in server.py."""
+"""Tests for the auto-sync loop and the shared sync lock.
+
+The loop lives in ``hevy2garmin.autosync`` and the lock in
+``hevy2garmin.syncstate``; the workflow-YAML helpers are still in
+``hevy2garmin.server``. State is always reached through the module
+(``syncstate.acquire_sync_lock()``, never a bare imported name) so patches in
+one place are visible everywhere.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hevy2garmin import server
+from hevy2garmin import autosync, server, syncstate
 from hevy2garmin.server import (
-    _acquire_sync_lock,
     _build_sync_workflow_yaml,
     _format_interval_label,
     _minutes_to_cron,
-    _sync_executing,
 )
 
 
@@ -71,14 +77,14 @@ class TestBuildSyncWorkflowYaml:
 class TestSyncLock:
     def test_acquire_and_release(self) -> None:
         """Lock can be acquired and released without crashing (verifies time module is imported)."""
-        assert _acquire_sync_lock() is True
-        _sync_executing.release()
+        assert syncstate.acquire_sync_lock() is True
+        syncstate.release_sync_lock()
 
     def test_acquire_blocks_second(self) -> None:
         """Second acquire returns False when lock is held."""
-        assert _acquire_sync_lock() is True
-        assert _acquire_sync_lock() is False  # Already held
-        _sync_executing.release()
+        assert syncstate.acquire_sync_lock() is True
+        assert syncstate.acquire_sync_lock() is False  # Already held
+        syncstate.release_sync_lock()
 
 
 class TestCronGraceDeferral:
@@ -150,8 +156,8 @@ class TestLifespanAutosync:
         scheduled: list[int] = []
         stopped: list[int] = []
         with patch.object(server, "load_config", lambda: config), \
-             patch.object(server, "_schedule_autosync", scheduled.append), \
-             patch.object(server, "_stop_autosync", lambda: stopped.append(1)):
+             patch.object(autosync, "schedule", scheduled.append), \
+             patch.object(autosync, "stop", lambda: stopped.append(1)):
             with TestClient(server.app):
                 pass
         return scheduled, stopped
@@ -188,7 +194,7 @@ class TestAutosyncLoop:
 
     @staticmethod
     def _run_loop(returns: list[int | None], sleeps: list[float]) -> None:
-        """Drive _autosync_loop with instant sleeps and canned sync results."""
+        """Drive autosync._loop with instant sleeps and canned sync results."""
         pending = list(returns)
 
         async def fake_sleep(seconds):
@@ -197,9 +203,9 @@ class TestAutosyncLoop:
         async def fake_threadpool(fn):
             return pending.pop(0)
 
-        with patch.object(server.asyncio, "sleep", fake_sleep), \
-             patch.object(server, "run_in_threadpool", fake_threadpool):
-            asyncio.run(server._autosync_loop(30))
+        with patch.object(autosync.asyncio, "sleep", fake_sleep), \
+             patch.object(autosync, "run_in_threadpool", fake_threadpool):
+            asyncio.run(autosync._loop(30))
 
     def test_sleeps_the_interval_before_first_sync(self) -> None:
         sleeps: list[float] = []
@@ -225,7 +231,7 @@ class TestAutosyncLoop:
 
     def test_cancellation_stops_the_loop(self) -> None:
         async def scenario():
-            task = asyncio.create_task(server._autosync_loop(60))
+            task = asyncio.create_task(autosync._loop(60))
             await asyncio.sleep(0)  # let it reach the first await
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -235,43 +241,43 @@ class TestAutosyncLoop:
 
 
 def _really_acquire() -> bool:
-    """Stand in for _acquire_sync_lock but take the real lock, so the
+    """Stand in for syncstate.acquire_sync_lock but take the real lock, so the
     ``finally: release()`` under test has something to release."""
-    return server._sync_executing.acquire(blocking=False)
+    return syncstate._sync_executing.acquire(blocking=False)
 
 
 class TestRunAutosyncOnce:
-    """_run_autosync_once returns the next interval, or None to stop the loop."""
+    """autosync.run_once returns the next interval, or None to stop the loop."""
 
     def test_returns_none_when_disabled(self) -> None:
-        with patch.object(server, "load_config", lambda: {"auto_sync": {"enabled": False}}):
-            assert server._run_autosync_once() is None
+        with patch.object(autosync, "load_config", lambda: {"auto_sync": {"enabled": False}}):
+            assert autosync.run_once() is None
 
     def test_returns_none_when_config_missing(self) -> None:
-        with patch.object(server, "load_config", lambda: {}):
-            assert server._run_autosync_once() is None
+        with patch.object(autosync, "load_config", lambda: {}):
+            assert autosync.run_once() is None
 
     def test_returns_interval_without_syncing_when_lock_held(self) -> None:
         """A sync already in flight must not be joined, but the loop continues."""
         cfg = {"auto_sync": {"enabled": True, "interval_minutes": 45}}
         called = []
-        with patch.object(server, "load_config", lambda: cfg), \
-             patch.object(server, "_acquire_sync_lock", lambda: False), \
-             patch.object(server, "sync", lambda **kw: called.append(kw)):
-            assert server._run_autosync_once() == 45
+        with patch.object(autosync, "load_config", lambda: cfg), \
+             patch.object(syncstate, "acquire_sync_lock", lambda: False), \
+             patch.object(autosync, "sync", lambda **kw: called.append(kw)):
+            assert autosync.run_once() == 45
         assert called == []
 
     def test_returns_interval_after_a_successful_sync(self) -> None:
         cfg = {"auto_sync": {"enabled": True, "interval_minutes": 90}}
         result = {"synced": 2, "skipped": 0, "failed": 0}
-        with patch.object(server, "load_config", lambda: cfg), \
-             patch.object(server, "_acquire_sync_lock", _really_acquire), \
-             patch.object(server, "sync", lambda **kw: result), \
-             patch.object(server, "_record_sync_log", lambda *a, **k: None):
-            assert server._run_autosync_once() == 90
+        with patch.object(autosync, "load_config", lambda: cfg), \
+             patch.object(syncstate, "acquire_sync_lock", _really_acquire), \
+             patch.object(autosync, "sync", lambda **kw: result), \
+             patch.object(syncstate, "record_sync_log", lambda *a, **k: None):
+            assert autosync.run_once() == 90
         # the lock must be free again for the next run
-        assert server._sync_executing.acquire(blocking=False)
-        server._sync_executing.release()
+        assert syncstate._sync_executing.acquire(blocking=False)
+        syncstate.release_sync_lock()
 
     def test_releases_lock_when_sync_raises(self) -> None:
         cfg = {"auto_sync": {"enabled": True, "interval_minutes": 30}}
@@ -279,13 +285,13 @@ class TestRunAutosyncOnce:
         def boom(**kw):
             raise RuntimeError("hevy down")
 
-        with patch.object(server, "load_config", lambda: cfg), \
-             patch.object(server, "_acquire_sync_lock", _really_acquire), \
-             patch.object(server, "sync", boom), \
-             patch.object(server, "_record_sync_log", lambda *a, **k: None):
-            assert server._run_autosync_once() == 30
-        assert server._sync_executing.acquire(blocking=False)
-        server._sync_executing.release()
+        with patch.object(autosync, "load_config", lambda: cfg), \
+             patch.object(syncstate, "acquire_sync_lock", _really_acquire), \
+             patch.object(autosync, "sync", boom), \
+             patch.object(syncstate, "record_sync_log", lambda *a, **k: None):
+            assert autosync.run_once() == 30
+        assert syncstate._sync_executing.acquire(blocking=False)
+        syncstate.release_sync_lock()
 
     def test_stops_loop_when_hevy_key_is_invalid(self) -> None:
         """A bad key would fail every cycle, so the loop must stop, not spin."""
@@ -297,11 +303,122 @@ class TestRunAutosyncOnce:
         def boom(**kw):
             raise HevyAuthError("401")
 
-        with patch.object(server, "load_config", lambda: cfg), \
-             patch.object(server, "_acquire_sync_lock", _really_acquire), \
-             patch.object(server, "sync", boom), \
-             patch.object(server, "save_config", saved.append), \
-             patch.object(server.db, "get_database_url", lambda: None), \
-             patch.object(server, "_record_sync_log", lambda *a, **k: None):
-            assert server._run_autosync_once() is None
+        with patch.object(autosync, "load_config", lambda: cfg), \
+             patch.object(syncstate, "acquire_sync_lock", _really_acquire), \
+             patch.object(autosync, "sync", boom), \
+             patch.object(autosync, "save_config", saved.append), \
+             patch.object(autosync.db, "get_database_url", lambda: None), \
+             patch.object(syncstate, "record_sync_log", lambda *a, **k: None):
+            assert autosync.run_once() is None
         assert saved and saved[0]["auto_sync"]["enabled"] is False
+
+
+class TestScheduleAndStop:
+    """schedule()/stop() own the task handle.
+
+    Covered because the lifespan tests patch both out, and the loop test
+    cancels its own task — so nothing here exercised the real cancel path.
+    """
+
+    def test_stop_cancels_the_running_task(self) -> None:
+        async def scenario():
+            autosync.schedule(60)
+            task = autosync._autosync_task
+            assert task is not None
+            await asyncio.sleep(0)  # let it reach the first await
+
+            autosync.stop()
+            assert autosync._autosync_task is None
+            # Checked via task.cancelled() rather than `await task`: a stop()
+            # that fails to cancel would leave the await blocked on the loop's
+            # hour-long sleep, so the test would hang instead of failing.
+            await asyncio.sleep(0)
+            assert task.cancelled()
+
+        asyncio.run(scenario())
+
+    def test_stop_is_a_no_op_without_a_task(self) -> None:
+        autosync.stop()  # must not raise
+        autosync.stop()
+        assert autosync._autosync_task is None
+
+    def test_schedule_replaces_the_previous_task(self) -> None:
+        """A second schedule() must not leave two loops syncing in parallel."""
+
+        async def scenario():
+            autosync.schedule(60)
+            first = autosync._autosync_task
+            await asyncio.sleep(0)
+
+            autosync.schedule(30)
+            second = autosync._autosync_task
+            assert second is not first
+            await asyncio.sleep(0)
+            assert first.cancelled()
+
+            autosync.stop()
+            await asyncio.sleep(0)
+            assert second.cancelled()
+
+        asyncio.run(scenario())
+
+
+class TestLastSyncTime:
+    """mark_synced()/get_last_sync_time() replaced a bare module global."""
+
+    def test_mark_synced_is_readable_back(self) -> None:
+        # Patched so the stamp is restored afterwards: _last_sync_time is
+        # process-wide, and leaking a value here makes every later dashboard
+        # render in the session report "just now".
+        with patch.object(syncstate, "_last_sync_time", None):
+            before = datetime.now(timezone.utc)
+            syncstate.mark_synced()
+            stamped = syncstate.get_last_sync_time()
+            assert stamped is not None
+            assert before <= stamped <= datetime.now(timezone.utc)
+
+    def test_starts_empty(self) -> None:
+        with patch.object(syncstate, "_last_sync_time", None):
+            assert syncstate.get_last_sync_time() is None
+
+
+class TestAutosyncStatus:
+    """status() renders the last/next sync labels the dashboard shows."""
+
+    @staticmethod
+    def _status(last_sync, *, enabled=True, interval=30) -> dict:
+        cfg = {"auto_sync": {"enabled": enabled, "interval_minutes": interval}}
+        with patch.object(autosync, "load_config", lambda: cfg), \
+             patch.object(autosync.db, "get_database_url", lambda: None), \
+             patch.object(syncstate, "_last_sync_time", last_sync):
+            return autosync.status()
+
+    def test_no_sync_yet_reports_no_times(self) -> None:
+        st = self._status(None)
+        assert st["last_sync"] is None
+        assert st["next_sync"] is None
+        assert st["enabled"] is True
+        assert st["interval_minutes"] == 30
+
+    def test_a_sync_seconds_ago_reads_just_now(self) -> None:
+        st = self._status(datetime.now(timezone.utc))
+        assert st["last_sync"] == "just now"
+
+    def test_minutes_are_reported_in_minutes(self) -> None:
+        st = self._status(datetime.now(timezone.utc) - timedelta(minutes=5))
+        assert st["last_sync"] == "5 min ago"
+        assert st["next_sync"] == "in 25 min"
+
+    def test_over_an_hour_is_reported_in_hours_and_minutes(self) -> None:
+        st = self._status(datetime.now(timezone.utc) - timedelta(minutes=90), interval=240)
+        assert st["last_sync"] == "1h 30m ago"
+        assert st["next_sync"] == "in 2h 30m"
+
+    def test_an_overdue_sync_is_soon(self) -> None:
+        st = self._status(datetime.now(timezone.utc) - timedelta(minutes=90), interval=30)
+        assert st["next_sync"] == "soon"
+
+    def test_next_sync_is_blank_while_disabled(self) -> None:
+        st = self._status(datetime.now(timezone.utc) - timedelta(minutes=5), enabled=False)
+        assert st["last_sync"] == "5 min ago"
+        assert st["next_sync"] is None
