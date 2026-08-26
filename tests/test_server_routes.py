@@ -18,6 +18,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
+from hevy2garmin import autosync, syncstate
 from hevy2garmin import server as srv
 
 
@@ -180,8 +181,8 @@ class TestToggleAutosync:
         with patch.object(srv, "load_config", lambda: {}), \
              patch.object(srv, "save_config", saved.append), \
              patch.object(srv.db, "get_database_url", lambda: None), \
-             patch.object(srv, "_schedule_autosync", started.append), \
-             patch.object(srv, "_stop_autosync", lambda: stopped.append(1)):
+             patch.object(autosync, "schedule", started.append), \
+             patch.object(autosync, "stop", lambda: stopped.append(1)):
             r = client.post("/api/toggle-autosync", data=form)
         return r, started, stopped, saved
 
@@ -216,7 +217,7 @@ class TestToggleAutosync:
         started: list[int] = []
         saved: list[dict] = []
         with patch.object(srv, "save_config", saved.append), \
-             patch.object(srv, "_schedule_autosync", started.append):
+             patch.object(autosync, "schedule", started.append):
             r = demo_client.post("/api/toggle-autosync", data={"enabled": "true"})
         assert r.json()["status"] == "demo"
         assert started == [] and saved == []
@@ -470,7 +471,7 @@ class TestRoutinesSync:
     def test_refuses_while_another_sync_holds_the_lock(self, client) -> None:
         """Two concurrent routine syncs would race on the Garmin calendar."""
         called: list[int] = []
-        with patch.object(srv, "_acquire_sync_lock", lambda: False), \
+        with patch.object(syncstate, "acquire_sync_lock", lambda: False), \
              patch.object(srv, "sync_routines", lambda **k: called.append(1)):
             r = client.post("/api/routines/sync")
         assert "already running" in r.text.lower()

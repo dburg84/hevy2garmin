@@ -8,7 +8,6 @@ import hmac
 import logging
 import os
 import re
-import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
@@ -23,7 +22,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader
 
-from hevy2garmin import db, garmin_login, login_ratelimit, __version__
+from hevy2garmin import autosync, db, garmin_login, login_ratelimit, syncstate, __version__
 from hevy2garmin.db_interface import NoWritableDatabaseError
 from hevy2garmin.auth import (
     auth_enabled, verify_session, sign_session, check_password, SESSION_COOKIE, session_ttl,
@@ -197,13 +196,13 @@ async def lifespan(app: FastAPI):
     if auto_cfg.get("enabled", False):
         interval = auto_cfg.get("interval_minutes", 30)
         logger.info("Auto-sync enabled on startup: every %d min", interval)
-        _schedule_autosync(interval)
+        autosync.schedule(interval)
     try:
         yield
     finally:
         # Without this a pending timer survives reload/shutdown and can fire a
         # sync against a half-torn-down process.
-        _stop_autosync()
+        autosync.stop()
 
 
 app = FastAPI(title="hevy2garmin", docs_url=None, redoc_url=None, lifespan=lifespan)
@@ -241,39 +240,15 @@ async def _no_database_handler(request: Request, exc: NoWritableDatabaseError) -
     return HTMLResponse(_NO_DB_PAGE, status_code=503)
 
 
-# ── Auto-sync state ─────────────────────────────────────────────────────────
+# ── Sync-session caches ─────────────────────────────────────────────────────
+# The shared sync lock and the last-sync timestamp live in
+# ``hevy2garmin.syncstate``; the auto-sync loop lives in
+# ``hevy2garmin.autosync``. What is left here is the exercise-mapping cache and
+# the per-session failed-upload set, which only this module's routes touch.
 
-_autosync_task: asyncio.Task | None = None
-# Still a threading.Lock, not an asyncio one: it is shared with the manual and
-# cron sync routes, and every acquire is non-blocking, so it never stalls the
-# event loop. It also has to be released from the worker thread that runs the
-# blocking sync.
-_sync_executing = threading.Lock()  # Prevents concurrent sync execution
-_sync_lock_acquired_at: float = 0  # time.time() when lock was acquired
-_SYNC_LOCK_TIMEOUT = 300  # 5 minutes — force-release if exceeded
-_last_sync_time: datetime | None = None
 _unmapped_cache: list[tuple[str, int]] | None = None
 _unmapped_cache_time: float = 0
 _failed_ids: set[str] = set()  # Workouts that failed upload this session (retried next session)
-
-
-def _acquire_sync_lock() -> bool:
-    """Try to acquire the sync lock. Force-release if held too long (hung sync)."""
-    global _sync_lock_acquired_at
-    if _sync_executing.acquire(blocking=False):
-        _sync_lock_acquired_at = time.time()
-        return True
-    # Check if the lock has been held too long (hung sync)
-    if _sync_lock_acquired_at and (time.time() - _sync_lock_acquired_at) > _SYNC_LOCK_TIMEOUT:
-        logger.warning("Sync lock held for >%ds — force-releasing (likely hung)", _SYNC_LOCK_TIMEOUT)
-        try:
-            _sync_executing.release()
-        except RuntimeError:
-            pass
-        if _sync_executing.acquire(blocking=False):
-            _sync_lock_acquired_at = time.time()
-            return True
-    return False
 
 
 def _get_unmapped_exercises() -> list[tuple[str, int]]:
@@ -326,166 +301,6 @@ def _get_unmapped_exercises() -> list[tuple[str, int]]:
     _unmapped_cache = sorted(unmapped.items(), key=lambda x: -x[1])
     _unmapped_cache_time = _t.time()
     return _unmapped_cache
-
-
-def _run_autosync_once() -> int | None:
-    """Execute one scheduled sync.
-
-    Returns the interval (minutes) to wait before the next run, or ``None`` when
-    the loop should stop — auto-sync was turned off, or the Hevy key is invalid.
-    Blocking on purpose: the caller runs it off the event loop.
-    """
-    global _last_sync_time
-    config = load_config()
-    auto_cfg = config.get("auto_sync", {})
-    if not auto_cfg.get("enabled", False):
-        return None
-
-    interval = auto_cfg.get("interval_minutes", 30)
-
-    if not _acquire_sync_lock():
-        logger.info("Auto-sync: skipped — another sync is running")
-        return interval
-
-    logger.info("Auto-sync: running scheduled sync")
-    hevy_auth_failed = False
-    try:
-        result = sync(limit=10, dry_run=False, record_log=False, respect_grace=True)
-    except Exception as e:
-        from hevy2garmin.hevy import HevyAuthError
-        if isinstance(e, HevyAuthError):
-            logger.error("Auto-sync: Hevy API key invalid — disabling auto-sync. %s", e)
-            config["auto_sync"]["enabled"] = False
-            save_config(config)
-            # Also persist to DB (Vercel filesystem is read-only)
-            if db.get_database_url():
-                try:
-                    import json as _json
-                    _db = db.get_db()
-                    if hasattr(_db, '_get_conn'):
-                        with _db._get_conn() as conn:
-                            with conn.cursor() as cur:
-                                cur.execute("""
-                                    INSERT INTO platform_credentials (platform, auth_type, credentials, status)
-                                    VALUES ('auto_sync', 'config', %s, 'active')
-                                    ON CONFLICT (platform) DO UPDATE SET credentials = EXCLUDED.credentials
-                                """, (_json.dumps({"enabled": False, "interval_minutes": config.get("auto_sync", {}).get("interval_minutes", 120)}),))
-                            conn.commit()
-                except Exception:
-                    pass
-            hevy_auth_failed = True
-        result = {"synced": 0, "skipped": 0, "failed": 1, "error": str(e)}
-    finally:
-        _sync_executing.release()
-
-    if hevy_auth_failed:
-        return None  # Stop the loop
-
-    _last_sync_time = datetime.now(timezone.utc)
-    _record_sync_log(result, trigger="auto")
-    return interval
-
-
-async def _autosync_loop(interval_minutes: int) -> None:
-    """Sleep, sync, repeat until auto-sync is turned off or the task is cancelled.
-
-    The interval is re-read from the config on every pass, so changing it takes
-    effect from the next cycle without restarting the loop.
-    """
-    while True:
-        await asyncio.sleep(interval_minutes * 60)
-        next_interval = await run_in_threadpool(_run_autosync_once)
-        if next_interval is None:
-            logger.info("Auto-sync: loop stopped")
-            return
-        interval_minutes = next_interval
-
-
-def _schedule_autosync(interval_minutes: int) -> None:
-    """(Re)start the auto-sync loop. Requires a running event loop."""
-    global _autosync_task
-    _stop_autosync()
-    _autosync_task = asyncio.create_task(_autosync_loop(interval_minutes))
-
-
-def _stop_autosync() -> None:
-    """Cancel the auto-sync loop if one is running."""
-    global _autosync_task
-    if _autosync_task is not None:
-        _autosync_task.cancel()
-        _autosync_task = None
-
-
-def _record_sync_log(result: dict, trigger: str = "manual") -> None:
-    """Record a sync result to SQLite. Best-effort — never breaks a sync.
-
-    Now that failure paths record too, this runs from inside exception
-    handlers; a DB write raising there would replace a handled error with a
-    500. The log is diagnostic, so losing a row is always the lesser loss.
-    """
-    try:
-        db.record_sync_log(
-            synced=result.get("synced", 0),
-            skipped=result.get("skipped", 0),
-            failed=result.get("failed", 0),
-            trigger=trigger,
-        )
-    except Exception:
-        logger.debug("sync_log record failed (trigger=%s)", trigger, exc_info=True)
-
-
-def _get_autosync_status() -> dict[str, Any]:
-    """Build auto-sync status dict for templates."""
-    config = load_config()
-    auto_cfg = config.get("auto_sync", {})
-    enabled = auto_cfg.get("enabled", False)
-    interval = auto_cfg.get("interval_minutes", 30)
-
-    # On cloud, read persisted state from DB (filesystem config doesn't persist)
-    if db.get_database_url():
-        try:
-            import json as _json
-            _db = db.get_db()
-            if hasattr(_db, '_get_conn'):
-                with _db._get_conn() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute("SELECT credentials FROM platform_credentials WHERE platform = 'auto_sync' LIMIT 1")
-                        row = cur.fetchone()
-                        if row and row.get("credentials"):
-                            creds = row["credentials"] if isinstance(row["credentials"], dict) else _json.loads(row["credentials"])
-                            enabled = creds.get("enabled", False)
-                            interval = creds.get("interval_minutes", 120)
-        except Exception:
-            pass
-
-    status: dict[str, Any] = {
-        "enabled": enabled,
-        "interval_minutes": interval,
-        "last_sync": None,
-        "next_sync": None,
-    }
-
-    if _last_sync_time:
-        elapsed = datetime.now(timezone.utc) - _last_sync_time
-        minutes_ago = int(elapsed.total_seconds() / 60)
-        if minutes_ago < 1:
-            status["last_sync"] = "just now"
-        elif minutes_ago < 60:
-            status["last_sync"] = f"{minutes_ago} min ago"
-        else:
-            hours_ago = minutes_ago // 60
-            status["last_sync"] = f"{hours_ago}h {minutes_ago % 60}m ago"
-
-        if enabled:
-            remaining = interval - minutes_ago
-            if remaining <= 0:
-                status["next_sync"] = "soon"
-            elif remaining < 60:
-                status["next_sync"] = f"in {remaining} min"
-            else:
-                status["next_sync"] = f"in {remaining // 60}h {remaining % 60}m"
-
-    return status
 
 
 def client_ip(request: Request) -> str:
@@ -829,7 +644,7 @@ async def dashboard(request: Request):
         skipped_count=terminal_counts["skipped"],
         hevy_total=hevy_total,
         recent=recent,
-        auto_sync=_get_autosync_status(),
+        auto_sync=autosync.status(),
         sync_log=db.get_sync_log(10),
         mapping_count=mapping_count,
         garmin_connected=garmin_connected,
@@ -1644,8 +1459,6 @@ async def api_pull_garmin_profile(request: Request):
 
 @app.post("/api/sync", response_class=HTMLResponse)
 async def api_sync(request: Request):
-    global _last_sync_time
-
     if is_demo_mode():
         from fastapi.responses import JSONResponse
         return JSONResponse({"status": "demo", "message": "Sync disabled in demo mode"})
@@ -1699,7 +1512,7 @@ async def api_sync(request: Request):
         sync_kwargs["since"] = since_dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
         sync_kwargs["fetch_all"] = True  # paginate until we hit the date
 
-    if not _acquire_sync_lock():
+    if not syncstate.acquire_sync_lock():
         return HTMLResponse('<div class="toast toast-error">Another sync is already running. Please wait.</div>')
 
     try:
@@ -1707,9 +1520,9 @@ async def api_sync(request: Request):
     except Exception as e:
         result = {"synced": 0, "skipped": 0, "failed": 1, "unmapped": [], "error": str(e)}
     finally:
-        _sync_executing.release()
-    _last_sync_time = datetime.now(timezone.utc)
-    _record_sync_log(result, trigger=f"manual ({scope})")
+        syncstate.release_sync_lock()
+    syncstate.mark_synced()
+    syncstate.record_sync_log(result, trigger=f"manual ({scope})")
     return _render("partials/sync_result.html", result=result)
 
 
@@ -1886,7 +1699,7 @@ async def api_routines_sync(request: Request):
     form = await request.form()
     force = form.get("force") in ("1", "true", "on")
 
-    if not _acquire_sync_lock():
+    if not syncstate.acquire_sync_lock():
         return HTMLResponse('<div class="toast toast-error">Another sync is already running. Please wait.</div>')
 
     try:
@@ -1895,7 +1708,7 @@ async def api_routines_sync(request: Request):
         logger.exception("Routine sync failed")
         return HTMLResponse('<div class="toast toast-error">Routine sync failed. Check the logs for details.</div>')
     finally:
-        _sync_executing.release()
+        syncstate.release_sync_lock()
 
     msg = (
         f"{result['created']} created, {result['updated']} updated, "
@@ -1919,7 +1732,7 @@ async def api_routine_sync_one(request: Request, hevy_routine_id: str):
     form = await request.form()
     force = form.get("force") in ("1", "true", "on")
 
-    if not _acquire_sync_lock():
+    if not syncstate.acquire_sync_lock():
         return HTMLResponse('<div class="toast toast-error">Another sync is already running. Please wait.</div>')
 
     try:
@@ -1928,7 +1741,7 @@ async def api_routine_sync_one(request: Request, hevy_routine_id: str):
         logger.exception("Routine %s sync failed", hevy_routine_id)
         return HTMLResponse('<div class="toast toast-error">Routine sync failed. Check the logs for details.</div>')
     finally:
-        _sync_executing.release()
+        syncstate.release_sync_lock()
 
     outcome = result["outcome"]
     # The routine title is user-controlled (Hevy account data), so escape it before
@@ -1963,7 +1776,7 @@ async def api_routine_schedule(request: Request, hevy_routine_id: str):
     except (ValueError, TypeError) as e:
         return HTMLResponse(f'<div class="toast toast-error">Invalid schedule: {e}</div>')
 
-    if not _acquire_sync_lock():
+    if not syncstate.acquire_sync_lock():
         return HTMLResponse('<div class="toast toast-error">Another sync is already running. Please wait.</div>')
 
     try:
@@ -1974,7 +1787,7 @@ async def api_routine_schedule(request: Request, hevy_routine_id: str):
         logger.exception("Scheduling routine %s failed", hevy_routine_id)
         return HTMLResponse('<div class="toast toast-error">Scheduling failed. Check the logs for details.</div>')
     finally:
-        _sync_executing.release()
+        syncstate.release_sync_lock()
 
     n = result["scheduled"]
     span = f" ({result['dates'][0]} → {result['dates'][-1]})" if n > 1 else f" on {result['dates'][0]}"
@@ -1995,7 +1808,7 @@ async def api_routine_unschedule(
     if is_demo_mode():
         return HTMLResponse('<div class="toast toast-success">Unscheduling disabled in demo mode.</div>')
 
-    if not _acquire_sync_lock():
+    if not syncstate.acquire_sync_lock():
         return HTMLResponse('<div class="toast toast-error">Another sync is already running. Please wait.</div>')
 
     try:
@@ -2004,7 +1817,7 @@ async def api_routine_unschedule(
         logger.exception("Unscheduling routine %s entry %s failed", hevy_routine_id, schedule_id)
         return HTMLResponse('<div class="toast toast-error">Could not remove the scheduled workout. Check the logs.</div>')
     finally:
-        _sync_executing.release()
+        syncstate.release_sync_lock()
 
     return _render("routine_schedules.html", **_schedules_context(page, start, q, size))
 
@@ -2037,7 +1850,7 @@ async def api_sync_single(request: Request, workout_id: str):
             respect_grace=False,
             database=db.get_db(),
         )
-        _record_sync_log(
+        syncstate.record_sync_log(
             {"synced": 1 if one.status == "synced" else 0,
              "failed": 1 if one.status == "failed" else 0},
             trigger="manual (single)",
@@ -2046,7 +1859,7 @@ async def api_sync_single(request: Request, workout_id: str):
         start = (workout.get("start_time") or "")[:16]
         return HTMLResponse(f'<tr><td><span class="badge badge-success">✓ Synced</span></td><td>{start}</td><td><strong>{workout["title"]}</strong></td><td>{len(workout.get("exercises", []))}</td><td></td></tr>')
     except Exception as e:
-        _record_sync_log({"failed": 1}, trigger="manual (single)")
+        syncstate.record_sync_log({"failed": 1}, trigger="manual (single)")
         return HTMLResponse(f'<td colspan="5" style="color: var(--pico-del-color);">Failed: {e}</td>')
 
 
@@ -2276,10 +2089,10 @@ async def api_toggle_autosync(request: Request):
             else:
                 logger.warning("Failed to set up GitHub Actions: %s", msg)
         else:
-            _schedule_autosync(interval)
+            autosync.schedule(interval)
         logger.info("Auto-sync enabled: every %d min", interval)
     else:
-        _stop_autosync()
+        autosync.stop()
         # On Vercel: delete the sync workflow to stop the cron
         if os.environ.get("VERCEL") and os.environ.get("GITHUB_PAT"):
             try:
@@ -2298,7 +2111,7 @@ async def api_toggle_autosync(request: Request):
                 logger.warning("Failed to delete sync workflow: %s", e)
         logger.info("Auto-sync disabled")
 
-    auto_sync = _get_autosync_status()
+    auto_sync = autosync.status()
     return _render("partials/autosync_status.html", auto_sync=auto_sync)
 
 
@@ -2527,7 +2340,7 @@ async def _sync_one_recorded(
     if is_demo_mode():
         return JSONResponse({"status": "demo", "message": "Sync disabled in demo mode"})
 
-    if not _acquire_sync_lock():
+    if not syncstate.acquire_sync_lock():
         return JSONResponse({"error": "Sync already running", "busy": True})
 
     try:
@@ -2536,10 +2349,10 @@ async def _sync_one_recorded(
         # Record before re-raising, so a crash mid-sync is not the one failure
         # mode that leaves /history looking healthy. The per-row and auto paths
         # both record on exception; this makes cron and Sync Now agree.
-        _record_sync_log({"failed": 1}, trigger=trigger)
+        syncstate.record_sync_log({"failed": 1}, trigger=trigger)
         raise
     finally:
-        _sync_executing.release()
+        syncstate.release_sync_lock()
 
     try:
         data = _json.loads(bytes(resp.body))
@@ -2549,7 +2362,7 @@ async def _sync_one_recorded(
         # exact ambiguity this is meant to remove. error/skipped_error are the
         # hard-stop shapes. needs_review/processing stay 0/0: still in flight.
         failed = 1 if (data.get("error") or data.get("skipped_error") or data.get("failed")) else 0
-        _record_sync_log({"synced": data.get("synced", 0), "failed": failed}, trigger=trigger)
+        syncstate.record_sync_log({"synced": data.get("synced", 0), "failed": failed}, trigger=trigger)
     except Exception:
         logger.debug("sync_log record failed", exc_info=True)
     return resp
@@ -2593,7 +2406,7 @@ def _scan_for_unsynced(hevy, is_synced, total_count, failed_ids, on_page=None):
 
 
 async def _do_sync_one(*, respect_grace: bool = False, merge_only: bool = False):
-    """Inner sync logic, called with _sync_executing lock held.
+    """Inner sync logic, called with the shared sync lock held.
 
     ``respect_grace`` is True for Vercel cron (wait for watch data) and False
     for manual Sync Now.
