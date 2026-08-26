@@ -327,3 +327,353 @@ class TestValidateHevy:
             r = client.get("/api/validate-hevy", params={"key": "bad"})
         assert r.status_code == 400
         assert r.json()["valid"] is False
+
+
+class TestReconcilePending:
+    """POST /api/pending/{id}/reconcile — asks Garmin what actually happened to
+    an in-flight upload, so a half-finished operation can be resolved."""
+
+    def test_rejects_malformed_id(self, client) -> None:
+        r = client.post("/api/pending/bad%20id!/reconcile")
+        assert r.status_code == 400
+        assert "Invalid workout ID" in r.json()["error"]
+
+    def test_no_pending_operation_returns_404(self, client) -> None:
+        class FakeDB:
+            def get_pending(self, h):
+                return None
+
+        with patch.object(srv.db, "get_db", lambda: FakeDB()):
+            r = client.post("/api/pending/w1/reconcile")
+        assert r.status_code == 404
+
+    def test_reports_the_resolved_status(self, client) -> None:
+        class FakeDB:
+            def get_pending(self, h):
+                return {"phase": "submitted"}
+
+        class Result:
+            status = "uploaded"
+
+        with patch.object(srv.db, "get_db", lambda: FakeDB()), \
+             patch.object(srv, "load_config", lambda: {}), \
+             patch("hevy2garmin.garmin.get_client", lambda e: object()), \
+             patch("hevy2garmin.sync.reconcile_pending", lambda s, c, h: Result()):
+            r = client.post("/api/pending/w1/reconcile")
+        assert r.status_code == 200
+        assert r.json() == {"ok": True, "status": "uploaded"}
+
+    def test_garmin_failure_is_502_not_500(self, client) -> None:
+        """A Garmin outage is an upstream failure, not a bug in this app."""
+
+        class FakeDB:
+            def get_pending(self, h):
+                return {"phase": "submitted"}
+
+        def boom(*a, **k):
+            raise RuntimeError("garmin down")
+
+        with patch.object(srv.db, "get_db", lambda: FakeDB()), \
+             patch.object(srv, "load_config", lambda: {}), \
+             patch("hevy2garmin.garmin.get_client", lambda e: object()), \
+             patch("hevy2garmin.sync.reconcile_pending", boom):
+            r = client.post("/api/pending/w1/reconcile")
+        assert r.status_code == 502
+        assert "garmin down" in r.json()["error"]
+
+
+class TestRetryPending:
+    """POST /api/pending/{id}/retry — re-uploads a definitively rejected upload.
+
+    Retrying anything still in flight could duplicate the activity on Garmin, so
+    it is gated on the operation having reached the 'failed' phase.
+    """
+
+    def test_rejects_malformed_id(self, client) -> None:
+        r = client.post("/api/pending/bad%20id!/retry", data={"confirm": "bad id!"})
+        assert r.status_code == 400
+
+    def test_requires_confirmation_matching_the_id(self, client) -> None:
+        r = client.post("/api/pending/w1/retry", data={"confirm": "w2"})
+        assert r.status_code == 400
+        assert "Explicit confirmation required" in r.json()["error"]
+
+    @pytest.mark.parametrize("phase", ["submitted", "uploading", "pending", None])
+    def test_only_failed_uploads_are_retryable(self, client, phase) -> None:
+        """Retrying an in-flight upload risks a duplicate activity on Garmin."""
+        synced: list[str] = []
+
+        class FakeDB:
+            def get_pending(self, h):
+                return None if phase is None else {"phase": phase}
+
+        with patch.object(srv.db, "get_db", lambda: FakeDB()), \
+             patch("hevy2garmin.sync.sync_one_workout", lambda *a, **k: synced.append(1)):
+            r = client.post("/api/pending/w1/retry", data={"confirm": "w1"})
+        assert r.status_code == 409
+        assert synced == [], "must not re-upload a non-failed operation"
+
+    def test_missing_stored_payload_is_409(self, client) -> None:
+        """Without the stored workout there is nothing to re-upload."""
+
+        class FakeDB:
+            def get_pending(self, h):
+                return {"phase": "failed", "payload": {}}
+
+            def delete_pending(self, h):
+                return True
+
+        with patch.object(srv.db, "get_db", lambda: FakeDB()), \
+             patch.object(srv, "load_config", lambda: {}), \
+             patch("hevy2garmin.garmin.get_client", lambda e: object()), \
+             patch("hevy2garmin.sync.reconcile_pending", lambda *a: None):
+            r = client.post("/api/pending/w1/retry", data={"confirm": "w1"})
+        assert r.status_code == 409
+        assert "payload is unavailable" in r.json()["error"]
+
+    def test_failed_upload_is_retried_and_pending_cleared(self, client) -> None:
+        deleted: list[str] = []
+
+        class FakeDB:
+            def get_pending(self, h):
+                return {"phase": "failed", "payload": {"workout": {"id": "w1"}}}
+
+            def delete_pending(self, h):
+                deleted.append(h)
+                return True
+
+        class Result:
+            status = "uploaded"
+
+        with patch.object(srv.db, "get_db", lambda: FakeDB()), \
+             patch.object(srv, "load_config", lambda: {}), \
+             patch("hevy2garmin.garmin.get_client", lambda e: object()), \
+             patch("hevy2garmin.sync.reconcile_pending", lambda *a: None), \
+             patch("hevy2garmin.sync.sync_one_workout", lambda *a, **k: Result()):
+            r = client.post("/api/pending/w1/retry", data={"confirm": "w1"})
+        assert r.status_code == 200
+        assert r.json() == {"ok": True, "status": "uploaded"}
+        assert deleted == ["w1"], "the old pending row must be cleared first"
+
+
+class TestRoutinesSync:
+    """POST /api/routines/sync — bulk-creates Garmin planned workouts."""
+
+    def test_demo_mode_does_not_sync(self, demo_client) -> None:
+        called: list[int] = []
+        with patch.object(srv, "sync_routines", lambda **k: called.append(1)):
+            r = demo_client.post("/api/routines/sync")
+        assert r.status_code == 200
+        assert "demo mode" in r.text.lower()
+        assert called == []
+
+    def test_refuses_while_another_sync_holds_the_lock(self, client) -> None:
+        """Two concurrent routine syncs would race on the Garmin calendar."""
+        called: list[int] = []
+        with patch.object(srv, "_acquire_sync_lock", lambda: False), \
+             patch.object(srv, "sync_routines", lambda **k: called.append(1)):
+            r = client.post("/api/routines/sync")
+        assert "already running" in r.text.lower()
+        assert called == []
+
+
+class TestGarminRateLimited:
+    """POST /api/garmin-rate-limited — records a Garmin cooldown the browser saw."""
+
+    def test_returns_the_recorded_cooldown(self, client) -> None:
+        with patch.object(srv, "record_rate_limit", lambda db: 7200):
+            r = client.post("/api/garmin-rate-limited")
+        assert r.status_code == 200
+        assert r.json()["cooldown_seconds"] == 7200
+
+    def test_storage_failure_reports_zero_instead_of_erroring(self, client) -> None:
+        """Losing the cooldown display is better than failing the caller."""
+
+        def boom(db):
+            raise RuntimeError("db down")
+
+        with patch.object(srv, "record_rate_limit", boom):
+            r = client.post("/api/garmin-rate-limited")
+        assert r.status_code == 200
+        assert r.json()["cooldown_seconds"] == 0
+
+
+class TestScanDuplicates:
+    """POST /api/scan-duplicates — log-only duplicate detection, never deletes."""
+
+    @pytest.mark.parametrize("found,expected", [(0, "Found 0"), (1, "Found 1"), (3, "Found 3")])
+    def test_reports_the_duplicate_count(self, client, found, expected) -> None:
+        dups = [("w%d" % i, "g%d" % i) for i in range(found)]
+        with patch.object(srv, "load_config", lambda: {"hevy_api_key": "k"}), \
+             patch("hevy2garmin.hevy.HevyClient", lambda api_key: object()), \
+             patch("hevy2garmin.garmin.get_client", lambda e: object()), \
+             patch("hevy2garmin.sync.fetch_workouts", lambda h, limit: [{"id": "w1"}]), \
+             patch("hevy2garmin.reconcile.detect_duplicates", lambda c, w, l: dups):
+            r = client.post("/api/scan-duplicates")
+        assert r.status_code == 200
+        assert expected in r.text
+
+    def test_never_deletes_anything(self, client) -> None:
+        """The scan is log-only by contract — it must not unsync or delete."""
+        destroyed: list[str] = []
+        with patch.object(srv, "load_config", lambda: {"hevy_api_key": "k"}), \
+             patch("hevy2garmin.hevy.HevyClient", lambda api_key: object()), \
+             patch("hevy2garmin.garmin.get_client", lambda e: object()), \
+             patch("hevy2garmin.sync.fetch_workouts", lambda h, limit: [{"id": "w1"}]), \
+             patch("hevy2garmin.reconcile.detect_duplicates", lambda c, w, l: [("w1", "g1")]), \
+             patch.object(srv.db, "unsync", lambda h: destroyed.append(h)), \
+             patch.object(srv.db, "unsync_all", lambda: destroyed.append("all")):
+            r = client.post("/api/scan-duplicates")
+        assert r.status_code == 200
+        assert destroyed == []
+
+    def test_upstream_failure_is_surfaced_not_crashed(self, client) -> None:
+        def boom(*a, **k):
+            raise RuntimeError("hevy down")
+
+        with patch.object(srv, "load_config", lambda: {"hevy_api_key": "k"}), \
+             patch("hevy2garmin.hevy.HevyClient", lambda api_key: object()), \
+             patch("hevy2garmin.garmin.get_client", lambda e: object()), \
+             patch("hevy2garmin.sync.fetch_workouts", boom):
+            r = client.post("/api/scan-duplicates")
+        assert r.status_code == 200  # HTMX partial carries the error
+        assert "Scan failed: hevy down" in r.text
+
+
+class TestPullGarminProfile:
+    """POST /api/pull-garmin-profile — imports weight/birth date/gender."""
+
+    def test_garmin_failure_is_reported_and_config_untouched(self, client) -> None:
+        """A failed pull must not half-write the profile into the config."""
+        saved: list[dict] = []
+
+        def boom(e):
+            raise RuntimeError("not logged in")
+
+        with patch.object(srv, "load_config", lambda: {}), \
+             patch.object(srv, "save_config", saved.append), \
+             patch("hevy2garmin.garmin.get_client", boom):
+            r = client.post("/api/pull-garmin-profile")
+        assert r.status_code == 200
+        assert "Failed: not logged in" in r.text
+        assert saved == []
+
+
+class TestGarminCategories:
+    """GET /api/garmin-categories — feeds the mapping UI's category picker."""
+
+    def test_serves_the_category_map(self, client) -> None:
+        with patch.object(srv, "_get_cat_names", lambda: {0: "Bench Press", 23: "Row"}):
+            r = client.get("/api/garmin-categories")
+        assert r.status_code == 200
+        assert r.json() == {"0": "Bench Press", "23": "Row"}
+
+    def test_serves_the_real_catalog_by_default(self, client) -> None:
+        """Unpatched, the bundled FIT catalog must yield a non-empty map — an
+        empty picker would silently break the mapping UI."""
+        r = client.get("/api/garmin-categories")
+        assert r.status_code == 200
+        body = r.json()
+        assert body, "category map must not be empty"
+        assert all(k.isdigit() for k in body), "keys are FIT category ids"
+
+
+class TestWorkoutHR:
+    """GET /api/workout/{id}/hr — HR series for the workout chart."""
+
+    def test_returns_404_when_hr_fusion_is_disabled(self, client) -> None:
+        with patch.object(srv, "load_config", lambda: {"hr_fusion": {"enabled": False}}):
+            r = client.get("/api/workout/w1/hr")
+        assert r.status_code == 404
+        assert "disabled" in r.json()["error"].lower()
+
+    def test_serves_the_cached_series_without_calling_garmin(self, client) -> None:
+        """The first load hits Garmin; later ones must come from cache."""
+        called: list[int] = []
+        cached = {"bpm": [120, 130], "timestamps": [1, 2]}
+        with patch.object(srv, "load_config", lambda: {"hr_fusion": {"enabled": True}}), \
+             patch.object(srv.db, "get_cached_hr", lambda h: cached), \
+             patch("hevy2garmin.garmin.get_client", lambda e: called.append(1)):
+            r = client.get("/api/workout/w1/hr")
+        assert r.status_code == 200
+        assert r.json() == cached
+        assert called == []
+
+
+class TestMappingsPage:
+    """GET /mappings — the exercise-mapping table."""
+
+    def test_renders_the_mapping_table(self, client) -> None:
+        r = client.get("/mappings")
+        assert r.status_code == 200
+        assert "<html" in r.text.lower()
+
+    def test_requires_auth_when_a_password_is_set(self) -> None:
+        """A page listing your exercises must sit behind the dashboard gate."""
+        srv._is_configured_cache = True
+        with patch.dict(os.environ, {"H2G_PASSWORD": "pw"}, clear=False):
+            c = TestClient(srv.app)
+            r = c.get("/mappings", follow_redirects=False)
+        assert r.status_code in (302, 303, 307)
+        assert "/login" in r.headers["location"]
+
+
+class TestSetupActions:
+    """POST /api/setup-actions — configures GitHub Actions on the user's fork.
+
+    Exempt from the "not configured → /setup" redirect, since it runs *during*
+    setup.
+    """
+
+    def test_reports_success_as_a_success_toast(self, client) -> None:
+        async def ok(interval_minutes):
+            return True, "Workflow created"
+
+        with patch.object(srv, "_setup_github_actions", ok):
+            r = client.post("/api/setup-actions", data={"interval": "60"})
+        assert r.status_code == 200
+        assert "toast-success" in r.text
+        assert "Workflow created" in r.text
+
+    def test_reports_failure_as_an_error_toast(self, client) -> None:
+        """A silent failure would leave the user believing auto-sync is on."""
+
+        async def fail(interval_minutes):
+            return False, "Bad credentials"
+
+        with patch.object(srv, "_setup_github_actions", fail):
+            r = client.post("/api/setup-actions", data={"interval": "60"})
+        assert r.status_code == 200
+        assert "toast-error" in r.text
+        assert "Bad credentials" in r.text
+
+    @pytest.mark.parametrize("raw,expected", [("30", 30), ("720", 720), ("abc", 120), ("", 120)])
+    def test_interval_is_parsed_with_a_120_fallback(self, client, raw, expected) -> None:
+        seen: list[int] = []
+
+        async def capture(interval_minutes):
+            seen.append(interval_minutes)
+            return True, "ok"
+
+        with patch.object(srv, "_setup_github_actions", capture):
+            client.post("/api/setup-actions", data={"interval": raw})
+        assert seen == [expected]
+
+    def test_reachable_before_the_app_is_configured(self, client) -> None:
+        """It runs during setup, so the /setup redirect must not swallow it."""
+        seen: list[int] = []
+
+        async def capture(interval_minutes):
+            seen.append(interval_minutes)
+            return True, "ok"
+
+        srv._is_configured_cache = False
+        try:
+            with patch.object(srv, "is_configured", lambda: False), \
+                 patch.object(srv, "_setup_github_actions", capture):
+                r = client.post("/api/setup-actions", data={"interval": "60"},
+                                follow_redirects=False)
+        finally:
+            srv._is_configured_cache = True
+        assert r.status_code == 200, "must not redirect to /setup"
+        assert seen == [60]
