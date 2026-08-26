@@ -8,7 +8,6 @@ import hmac
 import logging
 import os
 import re
-import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from html import escape
@@ -188,8 +187,7 @@ def _render(template_name: str, **ctx) -> HTMLResponse:
 async def lifespan(app: FastAPI):
     """Start the auto-sync timer if configured, and cancel it on shutdown.
 
-    The helpers below are defined later in this module; the body only runs at
-    startup, so the names resolve by then.
+    Scheduling and cancelling both live in :mod:`hevy2garmin.autosync`.
     """
     config = load_config()
     auto_cfg = config.get("auto_sync", {})

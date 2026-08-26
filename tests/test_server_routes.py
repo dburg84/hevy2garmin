@@ -178,7 +178,11 @@ class TestToggleAutosync:
         started: list[int] = []
         stopped: list[int] = []
         saved: list[dict] = []
+        # autosync.load_config as well as srv's: the route finishes by rendering
+        # autosync.status(), which reads the config through its own module. Left
+        # unpatched it would read the developer's real ~/.hevy2garmin/config.json.
         with patch.object(srv, "load_config", lambda: {}), \
+             patch.object(autosync, "load_config", lambda: {}), \
              patch.object(srv, "save_config", saved.append), \
              patch.object(srv.db, "get_database_url", lambda: None), \
              patch.object(autosync, "schedule", started.append), \

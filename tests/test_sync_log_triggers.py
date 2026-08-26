@@ -33,6 +33,12 @@ def client(monkeypatch):
     os.environ.pop("HEVY2GARMIN_SECRET", None)
     os.environ.pop("DEMO_MODE", None)
     os.environ.pop("CRON_SECRET", None)
+    # /api/sync hands off to GitHub Actions when both of these are set, which
+    # would skip the sync under test *and* fire a real repository_dispatch at
+    # api.github.com from whatever machine runs the suite.
+    os.environ.pop("GITHUB_PAT", None)
+    os.environ.pop("GITHUB_REPO", None)
+    os.environ.pop("VERCEL", None)
     from hevy2garmin import server
 
     monkeypatch.setattr(server, "_is_configured_cache", True)

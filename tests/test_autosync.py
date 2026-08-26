@@ -367,11 +367,15 @@ class TestLastSyncTime:
     """mark_synced()/get_last_sync_time() replaced a bare module global."""
 
     def test_mark_synced_is_readable_back(self) -> None:
-        before = datetime.now(timezone.utc)
-        syncstate.mark_synced()
-        stamped = syncstate.get_last_sync_time()
-        assert stamped is not None
-        assert before <= stamped <= datetime.now(timezone.utc)
+        # Patched so the stamp is restored afterwards: _last_sync_time is
+        # process-wide, and leaking a value here makes every later dashboard
+        # render in the session report "just now".
+        with patch.object(syncstate, "_last_sync_time", None):
+            before = datetime.now(timezone.utc)
+            syncstate.mark_synced()
+            stamped = syncstate.get_last_sync_time()
+            assert stamped is not None
+            assert before <= stamped <= datetime.now(timezone.utc)
 
     def test_starts_empty(self) -> None:
         with patch.object(syncstate, "_last_sync_time", None):
