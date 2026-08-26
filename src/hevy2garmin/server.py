@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import hmac
 import logging
@@ -9,6 +10,7 @@ import os
 import re
 import threading
 import time
+from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from html import escape
 from math import ceil
@@ -183,7 +185,28 @@ def _render(template_name: str, **ctx) -> HTMLResponse:
     return HTMLResponse(_apply_prefix(t.render(**ctx), prefix))
 
 
-app = FastAPI(title="hevy2garmin", docs_url=None, redoc_url=None)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Start the auto-sync timer if configured, and cancel it on shutdown.
+
+    The helpers below are defined later in this module; the body only runs at
+    startup, so the names resolve by then.
+    """
+    config = load_config()
+    auto_cfg = config.get("auto_sync", {})
+    if auto_cfg.get("enabled", False):
+        interval = auto_cfg.get("interval_minutes", 30)
+        logger.info("Auto-sync enabled on startup: every %d min", interval)
+        _schedule_autosync(interval)
+    try:
+        yield
+    finally:
+        # Without this a pending timer survives reload/shutdown and can fire a
+        # sync against a half-torn-down process.
+        _stop_autosync()
+
+
+app = FastAPI(title="hevy2garmin", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
@@ -220,8 +243,11 @@ async def _no_database_handler(request: Request, exc: NoWritableDatabaseError) -
 
 # ── Auto-sync state ─────────────────────────────────────────────────────────
 
-_autosync_timer: threading.Timer | None = None
-_autosync_lock = threading.Lock()
+_autosync_task: asyncio.Task | None = None
+# Still a threading.Lock, not an asyncio one: it is shared with the manual and
+# cron sync routes, and every acquire is non-blocking, so it never stalls the
+# event loop. It also has to be released from the worker thread that runs the
+# blocking sync.
 _sync_executing = threading.Lock()  # Prevents concurrent sync execution
 _sync_lock_acquired_at: float = 0  # time.time() when lock was acquired
 _SYNC_LOCK_TIMEOUT = 300  # 5 minutes — force-release if exceeded
@@ -302,18 +328,24 @@ def _get_unmapped_exercises() -> list[tuple[str, int]]:
     return _unmapped_cache
 
 
-def _run_autosync() -> None:
-    """Execute a sync and reschedule if still enabled."""
+def _run_autosync_once() -> int | None:
+    """Execute one scheduled sync.
+
+    Returns the interval (minutes) to wait before the next run, or ``None`` when
+    the loop should stop — auto-sync was turned off, or the Hevy key is invalid.
+    Blocking on purpose: the caller runs it off the event loop.
+    """
     global _last_sync_time
     config = load_config()
     auto_cfg = config.get("auto_sync", {})
     if not auto_cfg.get("enabled", False):
-        return
+        return None
+
+    interval = auto_cfg.get("interval_minutes", 30)
 
     if not _acquire_sync_lock():
         logger.info("Auto-sync: skipped — another sync is running")
-        _schedule_autosync(auto_cfg.get("interval_minutes", 30))
-        return
+        return interval
 
     logger.info("Auto-sync: running scheduled sync")
     hevy_auth_failed = False
@@ -347,33 +379,41 @@ def _run_autosync() -> None:
         _sync_executing.release()
 
     if hevy_auth_failed:
-        return  # Don't reschedule
+        return None  # Stop the loop
 
     _last_sync_time = datetime.now(timezone.utc)
     _record_sync_log(result, trigger="auto")
+    return interval
 
-    # Reschedule
-    _schedule_autosync(auto_cfg.get("interval_minutes", 30))
+
+async def _autosync_loop(interval_minutes: int) -> None:
+    """Sleep, sync, repeat until auto-sync is turned off or the task is cancelled.
+
+    The interval is re-read from the config on every pass, so changing it takes
+    effect from the next cycle without restarting the loop.
+    """
+    while True:
+        await asyncio.sleep(interval_minutes * 60)
+        next_interval = await run_in_threadpool(_run_autosync_once)
+        if next_interval is None:
+            logger.info("Auto-sync: loop stopped")
+            return
+        interval_minutes = next_interval
 
 
 def _schedule_autosync(interval_minutes: int) -> None:
-    """Schedule the next auto-sync run."""
-    global _autosync_timer
-    with _autosync_lock:
-        if _autosync_timer is not None:
-            _autosync_timer.cancel()
-        _autosync_timer = threading.Timer(interval_minutes * 60, _run_autosync)
-        _autosync_timer.daemon = True
-        _autosync_timer.start()
+    """(Re)start the auto-sync loop. Requires a running event loop."""
+    global _autosync_task
+    _stop_autosync()
+    _autosync_task = asyncio.create_task(_autosync_loop(interval_minutes))
 
 
 def _stop_autosync() -> None:
-    """Cancel any pending auto-sync timer."""
-    global _autosync_timer
-    with _autosync_lock:
-        if _autosync_timer is not None:
-            _autosync_timer.cancel()
-            _autosync_timer = None
+    """Cancel the auto-sync loop if one is running."""
+    global _autosync_task
+    if _autosync_task is not None:
+        _autosync_task.cancel()
+        _autosync_task = None
 
 
 def _record_sync_log(result: dict, trigger: str = "manual") -> None:
@@ -446,17 +486,6 @@ def _get_autosync_status() -> dict[str, Any]:
                 status["next_sync"] = f"in {remaining // 60}h {remaining % 60}m"
 
     return status
-
-
-@app.on_event("startup")
-async def _startup_autosync() -> None:
-    """Start auto-sync timer on server startup if enabled."""
-    config = load_config()
-    auto_cfg = config.get("auto_sync", {})
-    if auto_cfg.get("enabled", False):
-        interval = auto_cfg.get("interval_minutes", 30)
-        logger.info("Auto-sync enabled on startup: every %d min", interval)
-        _schedule_autosync(interval)
 
 
 def client_ip(request: Request) -> str:
