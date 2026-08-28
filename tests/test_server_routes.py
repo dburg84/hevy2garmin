@@ -682,3 +682,30 @@ class TestSetupActions:
             srv._is_configured_cache = True
         assert r.status_code == 200, "must not redirect to /setup"
         assert seen == [60]
+
+
+class TestTimezoneSetting:
+    """POST /settings persists the profile timezone used for FIT local_timestamp."""
+
+    _FORM = {
+        "weight_kg": "80", "birth_year": "1990", "sex": "male", "vo2max": "45",
+        "working_set_seconds": "40", "warmup_set_seconds": "25",
+        "rest_between_sets_seconds": "75", "rest_between_exercises_seconds": "120",
+    }
+
+    def _post(self, client, tz: str) -> dict:
+        store: dict = {"user_profile": {}, "timing": {}, "hr_fusion": {}}
+        with patch.object(srv, "load_config", lambda: store), \
+             patch.object(srv, "save_config", lambda c: store.update(c)), \
+             patch.object(srv.db, "get_database_url", lambda: None):
+            r = client.post("/settings", data={**self._FORM, "timezone": tz})
+        assert r.status_code == 200
+        return store
+
+    def test_timezone_is_saved_and_stripped(self, client) -> None:
+        store = self._post(client, "  Europe/Berlin  ")
+        assert store["user_profile"]["timezone"] == "Europe/Berlin"
+
+    def test_blank_timezone_persists_as_empty(self, client) -> None:
+        store = self._post(client, "")
+        assert store["user_profile"]["timezone"] == ""

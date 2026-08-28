@@ -576,10 +576,13 @@ account; the watch brand you wear at the gym doesn't matter. It runs in the
 browser/cloud, not on the watch.
 
 **My activity shows the wrong time on Strava.**
-When Garmin pushes an API-uploaded activity to Strava, Strava sometimes uses the
-upload time instead of the workout time. The FIT file and Garmin Connect have the
-correct time — this is a Garmin→Strava quirk for non-watch uploads and isn't
-something hevy2garmin can control.
+The FIT file and Garmin Connect have the correct time. The problem is the handoff
+to Strava: for uploads that did not come from a real Garmin device, Strava can
+render the raw UTC time instead of your local time, so a 6am workout in a UTC+3
+zone shows up as 3am. Set your **Timezone** in Settings (Profile section, an IANA
+name like `Europe/Berlin`) and the tool stamps your local time into the uploaded
+file, so the correct offset travels with the activity. Leave it blank to keep the
+previous UTC behaviour.
 
 **Does 2FA / MFA work on Garmin?**
 Native 2FA support is in progress (tracked in
