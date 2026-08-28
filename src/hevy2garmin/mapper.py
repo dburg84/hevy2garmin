@@ -106,7 +106,7 @@ HEVY_TO_GARMIN: dict[str, tuple[int, int]] = {
     #  BACK – Rows (category 23)
     # ======================================================================= #
     "Bent Over Row (Band)":                     (23, 0),   # row / barbell_straight_leg_deadlift_to_row (closest band row)
-    "Bent Over Row (Barbell)":                  (23, 65535),  # ROW / generic (no exact barbell bent-over sub in fit_tool)
+    "Bent Over Row (Barbell)":                  (23, 46),   # row / bent_over_row_with_barbell
     "Bent Over Row (Dumbbell)":                 (23, 2),   # row / dumbbell_row
     "Bent Over Row (Smith Machine)":            (23, 65535),  # ROW / generic (no smith-machine row in FIT)
     "Chest Supported Incline Row (Dumbbell)":   (23, 2),  # ROW / dumbbell_row
@@ -815,7 +815,10 @@ def lookup_exercise(hevy_name: str, template_id: str | None = None) -> tuple[int
 # Those strings are exactly the member names of the FIT SDK exercise enums that
 # fit-tool (already a dependency) ships, so we derive them instead of hand-
 # maintaining a second table.  ``ExerciseCategory`` maps the category int to its
-# name; a per-category ``*ExerciseName`` enum maps the subcategory int.
+# name; a per-category ``*ExerciseName`` enum maps the subcategory int.  The
+# pinned fit-tool carries a stale profile, so subcategories added to the FIT
+# SDK after it fall back to the bundled ``data/fit_exercise_catalog.json``
+# (exported from garmin-fit-sdk; see scripts/audit_mappings.py).
 # --------------------------------------------------------------------------- #
 
 # category int -> the fit-tool *ExerciseName enum class for its subcategories.
@@ -839,15 +842,36 @@ def _build_category_exercise_enum() -> dict[int, type]:
 
 _CATEGORY_EXERCISE_ENUM: dict[int, type] | None = None
 
+_FIT_EXERCISE_CATALOG: dict[str, dict[str, str]] | None = None
+
+
+def _catalog_exercise_name(category: int, subcategory: int) -> str | None:
+    """Resolve a subcategory name from the bundled FIT SDK catalog.
+
+    Fallback for pairs the pinned fit-tool's enums predate, e.g. ROW 46
+    (bent_over_row_with_barbell) which fit-tool 0.9.15 can't express (#328).
+    """
+    global _FIT_EXERCISE_CATALOG
+    if _FIT_EXERCISE_CATALOG is None:
+        import json
+        from importlib.resources import files
+
+        catalog = files("hevy2garmin").joinpath("data/fit_exercise_catalog.json")
+        _FIT_EXERCISE_CATALOG = json.loads(catalog.read_text())["exercise_names"]
+    name = _FIT_EXERCISE_CATALOG.get(str(category), {}).get(str(subcategory))
+    return name.upper() if name is not None else None
+
 
 def fit_exercise_strings(category: int, subcategory: int) -> tuple[str | None, str | None]:
     """Translate FIT numeric ``(category, subcategory)`` to Garmin API strings.
 
     Returns ``(category_str, exercise_name_str)`` where each is the FIT SDK enum
-    member name (e.g. ``("BENCH_PRESS", "BARBELL_BENCH_PRESS")``). Either element
-    is ``None`` when it cannot be resolved — the sentinel ``UNKNOWN`` category, a
-    subcategory outside the enum, or an SDK gap — so callers can fall back to a
-    generic step with a custom name instead of sending an invalid enum.
+    member name (e.g. ``("BENCH_PRESS", "BARBELL_BENCH_PRESS")``). The fit-tool
+    enums are tried first; pairs they predate resolve through the bundled FIT
+    SDK catalog. Either element is ``None`` when neither source resolves it —
+    the sentinel ``UNKNOWN`` category, a subcategory outside both, or an SDK
+    gap — so callers can fall back to a generic step with a custom name instead
+    of sending an invalid enum.
     """
     global _CATEGORY_EXERCISE_ENUM
     if category == _UNKNOWN_CATEGORY:
@@ -864,8 +888,8 @@ def fit_exercise_strings(category: int, subcategory: int) -> tuple[str | None, s
 
     enum_cls = _CATEGORY_EXERCISE_ENUM.get(category)
     if enum_cls is None:
-        return (category_str, None)
+        return (category_str, _catalog_exercise_name(category, subcategory))
     try:
         return (category_str, enum_cls(subcategory).name)
     except ValueError:
-        return (category_str, None)
+        return (category_str, _catalog_exercise_name(category, subcategory))

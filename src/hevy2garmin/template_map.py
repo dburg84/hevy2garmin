@@ -33,7 +33,7 @@ TEMPLATE_TO_GARMIN: dict[str, tuple[int, int]] = {
     "35B51B87": (0, 4),  # Bench Press - Close Grip (Barbell)
     "E644F828": (0, 25),  # Bench Press - Wide Grip (Barbell)
     "EA820646": (23, 0),  # Bent Over Row (Band)
-    "55E6546F": (23, 65535),  # Bent Over Row (Barbell)
+    "55E6546F": (23, 46),  # Bent Over Row (Barbell)
     "23E92538": (23, 2),  # Bent Over Row (Dumbbell)
     "A5AC6449": (7, 3),  # Bicep Curl (Barbell)
     "ADA8623C": (7, 8),  # Bicep Curl (Cable)

@@ -25,7 +25,7 @@ from hevy2garmin.garmin import (
     rename_activity,
     set_description,
 )
-from hevy2garmin.mapper import lookup_exercise
+from hevy2garmin.mapper import fit_exercise_strings, lookup_exercise
 
 logger = logging.getLogger("hevy2garmin")
 
@@ -115,14 +115,6 @@ _CATEGORY_NAMES: dict[int, str] = {
     65534: "UNKNOWN",
 }
 
-# Subcategory names per category. Built from the FIT SDK profile.
-# Only the most common ones are listed — unmapped subs fall back to
-# the category's generic "0" name.
-# Format: {(category_id, subcategory_id): "GARMIN_STRING_NAME"}
-#
-# We populate this lazily from fit_tool if available, otherwise
-# use the category name as the exercise name (Garmin accepts this).
-
 def _category_to_string(cat_id: int) -> str:
     return _CATEGORY_NAMES.get(cat_id, "UNKNOWN")
 
@@ -136,17 +128,7 @@ def _exercise_to_string(cat_id: int, sub_id: int) -> str | None:
     *name* as **"Unknown"** (#138), whereas a ``null`` name under a valid parent
     category is accepted and shown as the category's generic label.
     """
-    try:
-        import fit_tool.profile.profile_type as pt
-        from fit_tool.profile.profile_type import ExerciseCategory
-        # e.g. BENCH_PRESS (0) → BenchPressExerciseName enum
-        cat_name = ExerciseCategory(cat_id).name  # "BENCH_PRESS"
-        sub_enum_cls = getattr(pt, cat_name.title().replace("_", "") + "ExerciseName", None)
-        if sub_enum_cls is not None:
-            return sub_enum_cls(sub_id).name
-    except (ValueError, AttributeError, ImportError):
-        pass
-    return None
+    return fit_exercise_strings(cat_id, sub_id)[1]
 
 
 def _strip_exercise_names(payload: dict) -> dict:
@@ -338,8 +320,10 @@ def build_exercise_sets_payload(
         reps = s.get("reps")
         weight_kg = s.get("weight_kg")
 
+        # probability must be non-zero: Connect renders any exercise whose stored
+        # confidence is 0 as "Unknown" (#325). The web UI's own edits send 100.
         active_set: dict = {
-            "exercises": [{"category": cat_str, "name": sub_name, "probability": None}],
+            "exercises": [{"category": cat_str, "name": sub_name, "probability": 100}],
             "duration": round(scaled_dur, 3),
             "repetitionCount": int(reps) if reps is not None else 0,
             "weight": float(round(weight_kg * 1000)) if weight_kg else 0.0,

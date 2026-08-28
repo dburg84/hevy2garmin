@@ -14,7 +14,8 @@ against a strength workout hand-authored in Garmin Connect (via
 and ``weightValue`` is in **kilograms** (not grams). Garmin fills in
 ``weightUnit.factor`` and ``targetType`` itself, so we omit them. The exercise
 ``category``/``exerciseName`` strings come from :func:`mapper.fit_exercise_strings`,
-which derives them from the FIT SDK enums fit-tool ships.
+which derives them from the FIT SDK enums fit-tool ships, falling back to the
+bundled FIT SDK catalog for pairs the pinned fit-tool predates.
 
 Note: Garmin's own UI collapses identical consecutive sets into a
 ``RepeatGroupDTO`` with a rest step; this builder emits one flat ``interval``

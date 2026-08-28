@@ -40,6 +40,11 @@ class TestFitExerciseStrings:
         assert cat == "BENCH_PRESS"
         assert name is None
 
+    def test_newer_subcategory_resolves_via_catalog(self) -> None:
+        # ROW 46 postdates the pinned fit-tool's enums, so it resolves through
+        # the bundled FIT SDK catalog (#328).
+        assert fit_exercise_strings(23, 46) == ("ROW", "BENT_OVER_ROW_WITH_BARBELL")
+
 
 class TestRoutineToGarminWorkout:
     def _routine(self) -> dict:

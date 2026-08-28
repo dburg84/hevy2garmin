@@ -5,8 +5,10 @@ Two ground-truth sources are used:
 
 * **Garmin / FIT** — the official ``exercise_category`` enum plus the
   per-category ``*_exercise_name`` tables, exported from the ``garmin-fit-sdk``
-  package into ``fit_exercise_catalog.json`` (committed next to this script, so
-  the audit runs without the SDK installed). Regenerate the export with
+  package into ``src/hevy2garmin/data/fit_exercise_catalog.json`` (shipped
+  inside the package: the audit runs without the SDK installed, and the app
+  uses it to resolve names the pinned fit-tool's enums predate).
+  Regenerate the export with
   ``--regenerate-catalog`` after installing the SDK via the ``audit`` extra
   (``pip install -e ".[audit]"``); a cloned SDK on ``PYTHONPATH`` also works.
   NB: the runtime ``fit-tool`` dependency carries
@@ -43,7 +45,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
-CATALOG = HERE / "fit_exercise_catalog.json"
+CATALOG = REPO / "src" / "hevy2garmin" / "data" / "fit_exercise_catalog.json"
 MAPPER = REPO / "src" / "hevy2garmin" / "mapper.py"
 
 sys.path.insert(0, str(REPO / "src"))

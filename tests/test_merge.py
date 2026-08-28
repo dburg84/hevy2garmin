@@ -261,6 +261,9 @@ class TestBuildPayload:
                 continue
             for ex in s["exercises"]:
                 assert set(ex) == {"category", "name", "probability"}
+                # 0/null confidence makes Connect render the exercise as "Unknown"
+                # on watch-recorded activities (#325); the web UI's edits send 100
+                assert ex["probability"] == 100
                 assert isinstance(ex["category"], str) and ex["category"] != "UNKNOWN"
                 assert ex["name"] is None or isinstance(ex["name"], str)
                 # name must never echo the parent or the TOTAL_BODY placeholder
@@ -286,6 +289,26 @@ class TestBuildPayload:
         ex = active["exercises"][0]
         assert ex["category"] == "TOTAL_BODY"
         assert ex["name"] is None  # never "TOTAL_BODY" as the name
+
+    def test_catalog_only_subcategory_keeps_full_name(self):
+        """(23, 46) postdates the pinned fit-tool's enums; the bundled FIT SDK
+        catalog must resolve it so the set keeps its full name (#328)."""
+        workout = {
+            "title": "Pull",
+            "start_time": "2026-03-15T18:00:00+00:00",
+            "end_time": "2026-03-15T18:10:00+00:00",
+            "exercises": [
+                {"title": "Bent Over Row (Barbell)",
+                 "sets": [{"type": "normal", "weight_kg": 60, "reps": 8}]},
+            ],
+        }
+        payload = build_exercise_sets_payload(
+            workout, activity_id=1, activity_start_time="2026-03-15 18:00:00",
+            activity_duration_s=10 * 60,
+        )
+        active = next(s for s in payload["exerciseSets"] if s["setType"] == "ACTIVE")
+        assert active["exercises"][0]["category"] == "ROW"
+        assert active["exercises"][0]["name"] == "BENT_OVER_ROW_WITH_BARBELL"
 
     def test_empty_workout(self):
         """Workout with no exercises produces empty sets list."""
