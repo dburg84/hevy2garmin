@@ -30,6 +30,11 @@ dependencies = [
     "jinja2>=3.1",
     "python-multipart>=0.0.9",
     "pynacl>=1.5",
+    # Postgres/Neon driver. Kept in base (not just the [cloud] extra) because the
+    # Vercel one-click deploy — the primary hosted path — installs the pyproject
+    # base dependencies, not the [cloud] extra, so a cloud deploy needs it here or
+    # it fails at runtime with "No module named 'psycopg2'" (#357).
+    "psycopg2-binary>=2.9",
 ]
 
 [project.optional-dependencies]
