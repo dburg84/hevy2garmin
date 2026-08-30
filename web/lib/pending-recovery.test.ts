@@ -8,7 +8,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
  * path.
  */
 
-const generateFit = vi.fn(() => ({
+const generateFit = vi.fn((..._a: unknown[]) => ({
   fit: new Uint8Array([1, 2, 3]),
   exercises: 2,
   total_sets: 6,
@@ -18,7 +18,7 @@ const generateFit = vi.fn(() => ({
 }));
 vi.mock("hevy2garmin", () => ({ generateFit: (...a: unknown[]) => generateFit(...a) }));
 
-const getGarminClient = vi.fn(async () => ({ domain: "garmin.com" }));
+const getGarminClient = vi.fn(async (..._a: unknown[]) => ({ domain: "garmin.com" }));
 const findExistingActivity = vi.fn();
 const upload = vi.fn();
 const rename = vi.fn();
