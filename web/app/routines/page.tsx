@@ -1,5 +1,6 @@
 import { getDb } from "@/lib/db";
 import { HevyRoutinesList } from "@/components/hevy-routines-list";
+import { RoutineSchedules } from "@/components/routine-schedules";
 
 // Queries the live hevy2garmin Postgres per request — never at build time.
 export const dynamic = "force-dynamic";
@@ -11,6 +12,7 @@ interface RoutineRow {
   garmin_workout_id: string | null;
   scheduled_date: string | null;
   synced_at: string | null;
+  schedules: Array<{ scheduleId: string; date: string }>;
   schedule_count: number;
 }
 
@@ -32,7 +34,7 @@ async function loadRoutines(): Promise<RoutinesData> {
     return EMPTY;
   }
 
-  const [rows, scheduleCounts] = await Promise.all([
+  const [rows, scheduleEntries] = await Promise.all([
     sql`
       SELECT hevy_routine_id, title, COALESCE(status, 'success') AS status,
              garmin_workout_id, scheduled_date, synced_at
@@ -51,13 +53,20 @@ async function loadRoutines(): Promise<RoutinesData> {
         }>,
     ),
     sql`
-      SELECT hevy_routine_id, COUNT(*)::int AS n
+      SELECT hevy_routine_id, schedule_id, scheduled_date
       FROM routine_schedules
-      GROUP BY hevy_routine_id
-    `.catch(() => [] as Array<{ hevy_routine_id: string; n: number }>),
+      ORDER BY scheduled_date ASC
+    `.catch(
+      () => [] as Array<{ hevy_routine_id: string; schedule_id: string; scheduled_date: string | null }>,
+    ),
   ]);
 
-  const counts = new Map(scheduleCounts.map((c) => [c.hevy_routine_id, Number(c.n)]));
+  const schedules = new Map<string, Array<{ scheduleId: string; date: string }>>();
+  for (const e of scheduleEntries) {
+    const list = schedules.get(e.hevy_routine_id) ?? [];
+    list.push({ scheduleId: String(e.schedule_id), date: e.scheduled_date ?? "" });
+    schedules.set(e.hevy_routine_id, list);
+  }
 
   const mapped: RoutineRow[] = rows.map((r) => ({
     hevy_routine_id: r.hevy_routine_id,
@@ -66,7 +75,8 @@ async function loadRoutines(): Promise<RoutinesData> {
     garmin_workout_id: r.garmin_workout_id ?? null,
     scheduled_date: r.scheduled_date ?? null,
     synced_at: r.synced_at ?? null,
-    schedule_count: counts.get(r.hevy_routine_id) ?? 0,
+    schedules: schedules.get(r.hevy_routine_id) ?? [],
+    schedule_count: (schedules.get(r.hevy_routine_id) ?? []).length,
   }));
 
   return {
@@ -177,11 +187,6 @@ export default async function RoutinesPage() {
                 <tr key={r.hevy_routine_id}>
                   <td className="px-4 py-2 font-medium text-text">
                     {r.title || "Untitled routine"}
-                    {r.schedule_count > 0 && (
-                      <span className="ml-2 rounded-full bg-teal/15 px-2 py-0.5 text-xs font-medium text-teal">
-                        {r.schedule_count} scheduled
-                      </span>
-                    )}
                   </td>
                   <td className="px-4 py-2">
                     <StatusPill status={r.status} />
@@ -189,8 +194,8 @@ export default async function RoutinesPage() {
                   <td className="px-4 py-2 tabular-nums text-text-secondary">
                     {r.garmin_workout_id || "—"}
                   </td>
-                  <td className="whitespace-nowrap px-4 py-2 tabular-nums text-text-muted">
-                    {fmtDay(r.scheduled_date)}
+                  <td className="px-4 py-2">
+                    <RoutineSchedules hevyRoutineId={r.hevy_routine_id} entries={r.schedules} />
                   </td>
                   <td className="whitespace-nowrap px-4 py-2 tabular-nums text-text-muted">
                     {fmtDate(r.synced_at)}
