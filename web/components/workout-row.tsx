@@ -74,8 +74,10 @@ const actionBtn =
  * from /api/workout/[id]/hr (read-only) and draws an inline SVG.
  *
  * Pending rows get a "Resolve" affordance revealing "Mark as synced" (the user
- * uploaded it themselves) and "Skip" (never sync this one). Both POST to
- * DB-only routes (no Garmin call) and refresh the list on success.
+ * uploaded it themselves) and "Skip" (never sync this one). Terminal rows get an
+ * "Unsync" affordance that drops the local ledger row so the workout becomes a
+ * sync candidate again. All three POST to DB-only routes (no Garmin call) and
+ * refresh the list on success.
  */
 export function WorkoutRow({ item }: { item: WorkoutItem }) {
   const router = useRouter();
@@ -83,10 +85,12 @@ export function WorkoutRow({ item }: { item: WorkoutItem }) {
   const [samples, setSamples] = useState<number[] | null | undefined>(undefined); // undefined = not fetched
   const [loading, setLoading] = useState(false);
   const [resolving, setResolving] = useState(false);
+  const [unsyncing, setUnsyncing] = useState(false);
   const [acting, setActing] = useState(false);
   const [actionErr, setActionErr] = useState<string | null>(null);
   const canHr = Boolean(item.garmin_activity_id);
   const canResolve = item.kind === "pending";
+  const canUnsync = item.kind === "terminal";
 
   async function toggle() {
     const next = !open;
@@ -130,6 +134,29 @@ export function WorkoutRow({ item }: { item: WorkoutItem }) {
     }
   }
 
+  async function unsync() {
+    setActing(true);
+    setActionErr(null);
+    try {
+      const res = await fetch(`/api/unsync/${encodeURIComponent(item.hevy_id)}`, {
+        method: "POST",
+      });
+      const d = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      if (!res.ok || !d.ok) {
+        setActionErr(d.error ?? `Request failed (${res.status}).`);
+        return;
+      }
+      // The terminal row is gone; the server re-query drops it from the list and
+      // the workout becomes a sync candidate again.
+      setUnsyncing(false);
+      router.refresh();
+    } catch (err) {
+      setActionErr(err instanceof Error ? err.message : String(err));
+    } finally {
+      setActing(false);
+    }
+  }
+
   return (
     <li className="px-4 py-3">
       <div className="flex items-center justify-between gap-3">
@@ -152,9 +179,38 @@ export function WorkoutRow({ item }: { item: WorkoutItem }) {
               {open ? "Hide HR" : "HR"}
             </button>
           )}
+          {canUnsync && (
+            <button type="button" onClick={() => setUnsyncing((v) => !v)} className={actionBtn}>
+              {unsyncing ? "Cancel" : "Unsync"}
+            </button>
+          )}
           <StatusPill item={item} />
         </div>
       </div>
+
+      {unsyncing && (
+        <div className="mt-2 rounded-lg border border-border bg-surface p-3">
+          <p className="text-xs text-text-muted">
+            Remove this from the synced ledger so it can be synced again? The
+            Garmin activity itself is not deleted.
+          </p>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={unsync}
+              disabled={acting}
+              className="rounded-lg bg-danger/15 px-3 py-1.5 text-xs font-medium text-danger transition-colors hover:bg-danger/25 disabled:opacity-50"
+            >
+              {acting ? "Working…" : "Unsync"}
+            </button>
+            {actionErr && (
+              <span className="text-xs text-danger" role="alert">
+                {actionErr}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
 
       {resolving && (
         <div className="mt-2 rounded-lg border border-border bg-surface p-3">
