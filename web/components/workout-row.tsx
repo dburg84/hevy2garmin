@@ -74,10 +74,11 @@ const actionBtn =
  * from /api/workout/[id]/hr (read-only) and draws an inline SVG.
  *
  * Pending rows get a "Resolve" affordance revealing "Mark as synced" (the user
- * uploaded it themselves) and "Skip" (never sync this one). Terminal rows get an
- * "Unsync" affordance that drops the local ledger row so the workout becomes a
- * sync candidate again. All three POST to DB-only routes (no Garmin call) and
- * refresh the list on success.
+ * uploaded it themselves), "Skip" (never sync this one), and "Abandon" (drop the
+ * stuck in-flight attempt so it can retry). Terminal rows get an "Unsync"
+ * affordance that drops the local ledger row so the workout becomes a sync
+ * candidate again. All POST to DB-only routes (no Garmin call) and refresh the
+ * list on success.
  */
 export function WorkoutRow({ item }: { item: WorkoutItem }) {
   const router = useRouter();
@@ -125,6 +126,29 @@ export function WorkoutRow({ item }: { item: WorkoutItem }) {
       }
       // The server component re-queries; this row moves to terminal and the
       // pending banner count drops.
+      setResolving(false);
+      router.refresh();
+    } catch (err) {
+      setActionErr(err instanceof Error ? err.message : String(err));
+    } finally {
+      setActing(false);
+    }
+  }
+
+  async function abandon() {
+    setActing(true);
+    setActionErr(null);
+    try {
+      const res = await fetch(`/api/pending/${encodeURIComponent(item.hevy_id)}/abandon`, {
+        method: "POST",
+      });
+      const d = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      if (!res.ok || !d.ok) {
+        setActionErr(d.error ?? `Request failed (${res.status}).`);
+        return;
+      }
+      // The pending row is dropped; the workout becomes a candidate again and
+      // this row leaves the list on refresh.
       setResolving(false);
       router.refresh();
     } catch (err) {
@@ -215,8 +239,8 @@ export function WorkoutRow({ item }: { item: WorkoutItem }) {
       {resolving && (
         <div className="mt-2 rounded-lg border border-border bg-surface p-3">
           <p className="text-xs text-text-muted">
-            This workout is still in-flight. Resolve it manually — neither action
-            uploads to Garmin.
+            This workout is still in-flight. Mark it synced, skip it, or abandon
+            the stuck attempt so it can retry — none of these upload to Garmin.
           </p>
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <button
@@ -234,6 +258,15 @@ export function WorkoutRow({ item }: { item: WorkoutItem }) {
               className="rounded-lg bg-surface-active px-3 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:bg-border disabled:opacity-50"
             >
               Skip
+            </button>
+            <button
+              type="button"
+              onClick={abandon}
+              disabled={acting}
+              title="Drop the stuck attempt so it can be retried later"
+              className="rounded-lg px-3 py-1.5 text-xs font-medium text-text-muted underline-offset-2 transition-colors hover:text-text-secondary hover:underline disabled:opacity-50"
+            >
+              Abandon
             </button>
             {actionErr && (
               <span className="text-xs text-danger" role="alert">
