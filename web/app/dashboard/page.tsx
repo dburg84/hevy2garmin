@@ -1,6 +1,7 @@
 import { getDb } from "@/lib/db";
 import { SyncPanel } from "@/components/sync-panel";
 import { BatchSync } from "@/components/batch-sync";
+import { AutoSyncToggle } from "@/components/autosync-toggle";
 
 // Queries the live hevy2garmin Postgres per request — never at build time.
 export const dynamic = "force-dynamic";
@@ -32,6 +33,7 @@ interface DashboardData {
   syncedThisWeek: number;
   recent: RecentWorkout[];
   syncLog: SyncLogEntry[];
+  autoSyncEnabled: boolean;
 }
 
 const EMPTY: DashboardData = {
@@ -42,6 +44,7 @@ const EMPTY: DashboardData = {
   syncedThisWeek: 0,
   recent: [],
   syncLog: [],
+  autoSyncEnabled: false,
 };
 
 async function loadDashboard(): Promise<DashboardData> {
@@ -54,7 +57,7 @@ async function loadDashboard(): Promise<DashboardData> {
 
   // Every query is guarded so a missing/empty table degrades to a sane default
   // rather than crashing the whole page render.
-  const [connected, counts, recent, syncLog] = await Promise.all([
+  const [connected, counts, recent, syncLog, autoSync] = await Promise.all([
     sql`
       SELECT platform, status
       FROM platform_credentials
@@ -82,7 +85,15 @@ async function loadDashboard(): Promise<DashboardData> {
       ORDER BY id DESC
       LIMIT 10
     `.catch(() => [] as SyncLogEntry[]),
+    sql`
+      SELECT value FROM app_cache WHERE key = 'auto_sync' LIMIT 1
+    `.catch(() => [] as Array<{ value: unknown }>),
   ]);
+
+  const autoSyncValue =
+    autoSync[0]?.value && typeof autoSync[0].value === "object"
+      ? (autoSync[0].value as Record<string, unknown>)
+      : {};
 
   return {
     dbConfigured: true,
@@ -113,6 +124,7 @@ async function loadDashboard(): Promise<DashboardData> {
       failed: Number(r.failed) || 0,
       trigger: r.trigger ?? "manual",
     })),
+    autoSyncEnabled: Boolean(autoSyncValue.enabled),
   };
 }
 
@@ -212,6 +224,10 @@ export default async function DashboardPage() {
       {/* Sync controls (preview is dry-run; live upload is gated) */}
       <SyncPanel ready={data.hevyConnected && data.garminConnected} />
       <BatchSync ready={data.hevyConnected && data.garminConnected} />
+
+      <div className="mb-8">
+        <AutoSyncToggle enabled={data.autoSyncEnabled} />
+      </div>
 
       {/* Recent synced workouts */}
       <section className="mb-8">
