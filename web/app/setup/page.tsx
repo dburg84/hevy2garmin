@@ -1,5 +1,6 @@
 import { getDb } from "@/lib/db";
 import { ConnectHevy } from "@/components/connect-hevy";
+import { ConnectGarmin } from "@/components/connect-garmin";
 
 // Queries the live hevy2garmin Postgres per request — never at build time.
 export const dynamic = "force-dynamic";
@@ -100,19 +101,12 @@ export default async function SetupPage() {
           <h2 className="text-lg font-semibold text-text">Garmin Connect</h2>
           <StatusDot connected={garminConnected} />
         </div>
-        {garminConnected ? (
-          <p className="text-sm text-text-secondary">
-            Garmin is connected{data.garmin?.connected_at ? ` (${fmtDate(data.garmin.connected_at)})` : ""}.
-            Re-connecting from the web is coming next; for now the scheduled job
-            refreshes the Garmin session.
-          </p>
-        ) : (
-          <p className="text-sm text-text-secondary">
-            Garmin sign-in from the web (including the verification code step) is
-            coming next. Until then, the scheduled job establishes the Garmin
-            session.
+        {garminConnected && data.garmin?.connected_at && (
+          <p className="mb-3 text-xs text-text-muted">
+            Connected {fmtDate(data.garmin.connected_at)}.
           </p>
         )}
+        <ConnectGarmin connected={garminConnected} />
       </section>
     </main>
   );
