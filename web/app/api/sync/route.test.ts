@@ -75,7 +75,7 @@ describe("POST /api/sync — batch", () => {
     authEnabled.mockReturnValue(false); // authorized
     process.env.GITHUB_PAT = "pat";
     process.env.GITHUB_REPO = "drkostas/hevy2garmin";
-    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    const fetchMock = vi.fn(async (..._a: unknown[]) => new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);
     const res = await POST(req("http://h/api/sync?live=1", {}));
     const json = await res.json();
@@ -83,7 +83,7 @@ describe("POST /api/sync — batch", () => {
     expect(json.mode).toBe("dispatch");
     expect(json.triggered).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toContain("/repos/drkostas/hevy2garmin/dispatches");
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/repos/drkostas/hevy2garmin/dispatches");
     expect(syncOneWorkout).not.toHaveBeenCalled();
   });
 
