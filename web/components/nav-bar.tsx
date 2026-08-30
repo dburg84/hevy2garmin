@@ -11,6 +11,7 @@ const NAV_ITEMS = [
   { href: "/mappings", label: "Mappings", icon: "⇄" },
   { href: "/history", label: "History", icon: "◷" },
   { href: "/settings", label: "Settings", icon: "⚙" },
+  { href: "/setup", label: "Setup", icon: "⇆" },
 ];
 
 export function NavBar({ authEnabled = false }: { authEnabled?: boolean }) {
