@@ -1,4 +1,5 @@
 import { getDb } from "@/lib/db";
+import { SettingsForm } from "@/components/settings-form";
 
 // Queries the live hevy2garmin Postgres per request — never at build time.
 export const dynamic = "force-dynamic";
@@ -114,19 +115,25 @@ function StatusPill({ status }: { status: string }) {
 
 export default async function SettingsPage() {
   const data = await loadSettings();
+  const cfg = (key: string): Record<string, unknown> =>
+    data.config.find((c) => c.key === key)?.value ?? {};
+  const autoSync = cfg("auto_sync");
+  const hrFusion = cfg("hr_fusion");
+  const merge = cfg("merge_settings");
+  const profile = cfg("user_profile");
 
   return (
     <main className="mx-auto max-w-5xl px-4 py-8 md:px-6">
       <header className="mb-4">
         <h1 className="text-2xl font-bold text-text">Settings</h1>
         <p className="mt-1 text-sm text-text-secondary">
-          Current configuration and connection status.
+          Configuration and connection status.
         </p>
       </header>
 
       <div className="mb-6 rounded-lg border border-border bg-surface p-4 text-sm text-text-muted">
-        Read-only for now. Editing credentials and config from the web app comes
-        in a later phase.
+        Editing platform credentials from the web comes in a later phase; the
+        config below is editable now.
       </div>
 
       {!data.dbConfigured && (
@@ -178,9 +185,21 @@ export default async function SettingsPage() {
         )}
       </section>
 
-      {/* Config */}
-      <section>
+      {/* Editable config */}
+      <section className="mb-8">
         <h2 className="mb-3 text-lg font-semibold text-text">Configuration</h2>
+        <SettingsForm
+          autoSyncEnabled={Boolean(autoSync.enabled)}
+          autoSyncInterval={Number(autoSync.interval_minutes) || 120}
+          hrFusionEnabled={hrFusion.enabled == null ? true : Boolean(hrFusion.enabled)}
+          mergeWatchStrategy={String(merge.merge_watch_strategy ?? "merge")}
+          weightKg={profile.weight_kg != null ? Number(profile.weight_kg) : null}
+        />
+      </section>
+
+      {/* All stored config (read-only reference) */}
+      <section>
+        <h2 className="mb-3 text-lg font-semibold text-text">Stored config</h2>
         {data.config.length === 0 ? (
           <div className="rounded-lg border border-border bg-surface p-6 text-center text-sm text-text-muted">
             No configuration stored yet (defaults are in use).
