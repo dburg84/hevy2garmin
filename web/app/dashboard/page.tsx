@@ -1,5 +1,6 @@
 import { getDb } from "@/lib/db";
 import { SyncPanel } from "@/components/sync-panel";
+import { BatchSync } from "@/components/batch-sync";
 
 // Queries the live hevy2garmin Postgres per request — never at build time.
 export const dynamic = "force-dynamic";
@@ -210,6 +211,7 @@ export default async function DashboardPage() {
 
       {/* Sync controls (preview is dry-run; live upload is gated) */}
       <SyncPanel ready={data.hevyConnected && data.garminConnected} />
+      <BatchSync ready={data.hevyConnected && data.garminConnected} />
 
       {/* Recent synced workouts */}
       <section className="mb-8">
