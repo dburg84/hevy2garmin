@@ -111,8 +111,9 @@ export default async function WorkoutsPage() {
       </header>
 
       <div className="mb-6 rounded-lg border border-border bg-surface p-4 text-sm text-text-muted">
-        Live Hevy fetch and per-workout sync actions come in a later phase.
-        Expand a Garmin-matched workout to see its cached heart-rate.
+        Resolve an in-flight workout with Mark as synced or Skip, and expand a
+        Garmin-matched workout to see its cached heart-rate. Live Hevy fetch and
+        one-click Garmin upload come in a later phase.
       </div>
 
       {!data.dbConfigured && (
