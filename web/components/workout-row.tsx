@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 export interface WorkoutItem {
@@ -63,16 +64,29 @@ function HrChart({ samples }: { samples: number[] }) {
   );
 }
 
+const actionBtn =
+  "rounded-lg border border-border px-2.5 py-1 text-xs font-medium text-text-secondary transition-colors hover:bg-surface-active disabled:opacity-50";
+
 /**
- * A workout row with an on-demand heart-rate chart. The HR toggle appears only
- * when the workout is matched to a Garmin activity; expanding it fetches the
- * cached HR from /api/workout/[id]/hr (read-only) and draws an inline SVG.
+ * A workout row with an on-demand heart-rate chart and, for in-flight (pending)
+ * workouts, manual-resolution controls. The HR toggle appears only when the
+ * workout is matched to a Garmin activity; expanding it fetches the cached HR
+ * from /api/workout/[id]/hr (read-only) and draws an inline SVG.
+ *
+ * Pending rows get a "Resolve" affordance revealing "Mark as synced" (the user
+ * uploaded it themselves) and "Skip" (never sync this one). Both POST to
+ * DB-only routes (no Garmin call) and refresh the list on success.
  */
 export function WorkoutRow({ item }: { item: WorkoutItem }) {
+  const router = useRouter();
   const [open, setOpen] = useState(false);
   const [samples, setSamples] = useState<number[] | null | undefined>(undefined); // undefined = not fetched
   const [loading, setLoading] = useState(false);
+  const [resolving, setResolving] = useState(false);
+  const [acting, setActing] = useState(false);
+  const [actionErr, setActionErr] = useState<string | null>(null);
   const canHr = Boolean(item.garmin_activity_id);
+  const canResolve = item.kind === "pending";
 
   async function toggle() {
     const next = !open;
@@ -91,6 +105,31 @@ export function WorkoutRow({ item }: { item: WorkoutItem }) {
     }
   }
 
+  async function resolve(action: "mark-synced" | "skip") {
+    setActing(true);
+    setActionErr(null);
+    try {
+      const res = await fetch(`/api/workout/${encodeURIComponent(item.hevy_id)}/${action}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "resolved from web" }),
+      });
+      const d = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      if (!res.ok || !d.ok) {
+        setActionErr(d.error ?? `Request failed (${res.status}).`);
+        return;
+      }
+      // The server component re-queries; this row moves to terminal and the
+      // pending banner count drops.
+      setResolving(false);
+      router.refresh();
+    } catch (err) {
+      setActionErr(err instanceof Error ? err.message : String(err));
+    } finally {
+      setActing(false);
+    }
+  }
+
   return (
     <li className="px-4 py-3">
       <div className="flex items-center justify-between gap-3">
@@ -103,18 +142,52 @@ export function WorkoutRow({ item }: { item: WorkoutItem }) {
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {canResolve && (
+            <button type="button" onClick={() => setResolving((v) => !v)} className={actionBtn}>
+              {resolving ? "Cancel" : "Resolve"}
+            </button>
+          )}
           {canHr && (
-            <button
-              type="button"
-              onClick={toggle}
-              className="rounded-lg border border-border px-2.5 py-1 text-xs font-medium text-text-secondary transition-colors hover:bg-surface-active"
-            >
+            <button type="button" onClick={toggle} className={actionBtn}>
               {open ? "Hide HR" : "HR"}
             </button>
           )}
           <StatusPill item={item} />
         </div>
       </div>
+
+      {resolving && (
+        <div className="mt-2 rounded-lg border border-border bg-surface p-3">
+          <p className="text-xs text-text-muted">
+            This workout is still in-flight. Resolve it manually — neither action
+            uploads to Garmin.
+          </p>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => resolve("mark-synced")}
+              disabled={acting}
+              className="rounded-lg bg-warm/20 px-3 py-1.5 text-xs font-medium text-warm transition-colors hover:bg-warm/30 disabled:opacity-50"
+            >
+              {acting ? "Working…" : "Mark as synced"}
+            </button>
+            <button
+              type="button"
+              onClick={() => resolve("skip")}
+              disabled={acting}
+              className="rounded-lg bg-surface-active px-3 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:bg-border disabled:opacity-50"
+            >
+              Skip
+            </button>
+            {actionErr && (
+              <span className="text-xs text-danger" role="alert">
+                {actionErr}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
       {open && (
         <div>
           {loading ? (
