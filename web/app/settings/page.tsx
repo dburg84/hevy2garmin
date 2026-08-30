@@ -1,6 +1,7 @@
 import { getDb } from "@/lib/db";
 import { SettingsForm } from "@/components/settings-form";
 import { DangerZone } from "@/components/danger-zone";
+import { ScanDuplicates } from "@/components/scan-duplicates";
 
 // Queries the live hevy2garmin Postgres per request — never at build time.
 export const dynamic = "force-dynamic";
@@ -245,6 +246,12 @@ export default async function SettingsPage() {
             ))}
           </div>
         )}
+      </section>
+
+      {/* Maintenance */}
+      <section className="mt-8">
+        <h2 className="mb-3 text-lg font-semibold text-text">Maintenance</h2>
+        <ScanDuplicates />
       </section>
 
       {/* Danger zone */}
