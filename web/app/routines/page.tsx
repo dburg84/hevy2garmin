@@ -1,4 +1,5 @@
 import { getDb } from "@/lib/db";
+import { HevyRoutinesList } from "@/components/hevy-routines-list";
 
 // Queries the live hevy2garmin Postgres per request — never at build time.
 export const dynamic = "force-dynamic";
@@ -132,9 +133,11 @@ export default async function RoutinesPage() {
       </header>
 
       <div className="mb-6 rounded-lg border border-border bg-surface p-4 text-sm text-text-muted">
-        Routines are synced by the pipeline. Scheduling and one-click routine
-        sync from the web come in a later phase.
+        Sync a Hevy routine to Garmin as a planned workout and add it to a
+        calendar date. Synced routines are listed below.
       </div>
+
+      {data.dbConfigured && <HevyRoutinesList />}
 
       {!data.dbConfigured && (
         <div className="mb-6 rounded-lg border border-warm/40 bg-warm/10 p-4 text-sm text-warm">
