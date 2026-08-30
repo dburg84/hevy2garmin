@@ -1,5 +1,6 @@
 import { getDb } from "@/lib/db";
 import { WorkoutRow } from "@/components/workout-row";
+import { CandidatesList } from "@/components/candidates-list";
 
 // Queries the live hevy2garmin Postgres per request — never at build time.
 export const dynamic = "force-dynamic";
@@ -111,10 +112,12 @@ export default async function WorkoutsPage() {
       </header>
 
       <div className="mb-6 rounded-lg border border-border bg-surface p-4 text-sm text-text-muted">
-        Resolve an in-flight workout with Mark as synced or Skip, and expand a
-        Garmin-matched workout to see its cached heart-rate. Live Hevy fetch and
-        one-click Garmin upload come in a later phase.
+        Sync an unsynced workout from the To sync list, resolve an in-flight one
+        with Mark as synced / Skip / Abandon, and expand a Garmin-matched workout
+        to see its cached heart-rate.
       </div>
+
+      {data.dbConfigured && <CandidatesList />}
 
       {!data.dbConfigured && (
         <div className="mb-6 rounded-lg border border-warm/40 bg-warm/10 p-4 text-sm text-warm">
