@@ -1,5 +1,6 @@
 import { getDb } from "@/lib/db";
 import { SettingsForm } from "@/components/settings-form";
+import { DangerZone } from "@/components/danger-zone";
 
 // Queries the live hevy2garmin Postgres per request — never at build time.
 export const dynamic = "force-dynamic";
@@ -22,9 +23,10 @@ interface SettingsData {
   dbConfigured: boolean;
   platforms: PlatformRow[];
   config: ConfigEntry[];
+  syncedCount: number;
 }
 
-const EMPTY: SettingsData = { dbConfigured: false, platforms: [], config: [] };
+const EMPTY: SettingsData = { dbConfigured: false, platforms: [], config: [], syncedCount: 0 };
 
 // The user-editable config the Python app persists to app_cache (config.py).
 const CONFIG_KEYS = ["user_profile", "timing", "hr_fusion", "merge_settings", "auto_sync"];
@@ -37,7 +39,7 @@ async function loadSettings(): Promise<SettingsData> {
     return EMPTY;
   }
 
-  const [platforms, config] = await Promise.all([
+  const [platforms, config, counts] = await Promise.all([
     sql`
       SELECT platform, auth_type, status, connected_at, expires_at
       FROM platform_credentials
@@ -49,10 +51,14 @@ async function loadSettings(): Promise<SettingsData> {
       WHERE key = ANY(${CONFIG_KEYS})
       ORDER BY key ASC
     `.catch(() => [] as ConfigEntry[]),
+    sql`SELECT count(*)::int AS n FROM synced_workouts`.catch(
+      () => [] as Array<{ n: number }>,
+    ),
   ]);
 
   return {
     dbConfigured: true,
+    syncedCount: Number(counts[0]?.n ?? 0),
     platforms: platforms.map((p) => ({
       platform: p.platform,
       auth_type: p.auth_type ?? "",
@@ -239,6 +245,12 @@ export default async function SettingsPage() {
             ))}
           </div>
         )}
+      </section>
+
+      {/* Danger zone */}
+      <section className="mt-8">
+        <h2 className="mb-3 text-lg font-semibold text-danger">Danger zone</h2>
+        <DangerZone syncedCount={data.syncedCount} />
       </section>
     </main>
   );
