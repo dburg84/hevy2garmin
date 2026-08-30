@@ -89,6 +89,8 @@ export function WorkoutRow({ item }: { item: WorkoutItem }) {
   const [unsyncing, setUnsyncing] = useState(false);
   const [acting, setActing] = useState(false);
   const [actionErr, setActionErr] = useState<string | null>(null);
+  const [recoveryMsg, setRecoveryMsg] = useState<string | null>(null);
+  const [retryConfirm, setRetryConfirm] = useState(false);
   const canHr = Boolean(item.garmin_activity_id);
   const canResolve = item.kind === "pending";
   const canUnsync = item.kind === "terminal";
@@ -149,6 +151,57 @@ export function WorkoutRow({ item }: { item: WorkoutItem }) {
       }
       // The pending row is dropped; the workout becomes a candidate again and
       // this row leaves the list on refresh.
+      setResolving(false);
+      router.refresh();
+    } catch (err) {
+      setActionErr(err instanceof Error ? err.message : String(err));
+    } finally {
+      setActing(false);
+    }
+  }
+
+  async function reconcile() {
+    setActing(true);
+    setActionErr(null);
+    setRecoveryMsg(null);
+    try {
+      const res = await fetch(`/api/pending/${encodeURIComponent(item.hevy_id)}/reconcile`, {
+        method: "POST",
+      });
+      const d = (await res.json().catch(() => ({}))) as { ok?: boolean; status?: string; error?: string };
+      if (!res.ok || !d.ok) {
+        setActionErr(d.error ?? `Request failed (${res.status}).`);
+        return;
+      }
+      if (d.status === "reconciled_synced") {
+        setResolving(false);
+        router.refresh(); // Garmin already had it — this row is now terminal.
+      } else {
+        setRecoveryMsg("Not on Garmin yet — still pending.");
+      }
+    } catch (err) {
+      setActionErr(err instanceof Error ? err.message : String(err));
+    } finally {
+      setActing(false);
+    }
+  }
+
+  async function retry() {
+    setActing(true);
+    setActionErr(null);
+    setRecoveryMsg(null);
+    try {
+      const res = await fetch(`/api/pending/${encodeURIComponent(item.hevy_id)}/retry`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: item.hevy_id }),
+      });
+      const d = (await res.json().catch(() => ({}))) as { ok?: boolean; status?: string; error?: string };
+      if (!res.ok || !d.ok) {
+        setActionErr(d.error ?? `Request failed (${res.status}).`);
+        return;
+      }
+      setRetryConfirm(false);
       setResolving(false);
       router.refresh();
     } catch (err) {
@@ -272,6 +325,52 @@ export function WorkoutRow({ item }: { item: WorkoutItem }) {
               <span className="text-xs text-danger" role="alert">
                 {actionErr}
               </span>
+            )}
+          </div>
+
+          <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-border pt-2">
+            <span className="text-xs text-text-muted">Recovery:</span>
+            <button
+              type="button"
+              onClick={reconcile}
+              disabled={acting}
+              title="Check whether Garmin already has this activity"
+              className={actionBtn}
+            >
+              {acting ? "Working…" : "Check Garmin"}
+            </button>
+            {!retryConfirm ? (
+              <button
+                type="button"
+                onClick={() => setRetryConfirm(true)}
+                disabled={acting}
+                title="Re-upload this workout to Garmin"
+                className={actionBtn}
+              >
+                Retry upload
+              </button>
+            ) : (
+              <span className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={retry}
+                  disabled={acting}
+                  className="rounded-lg bg-teal/20 px-3 py-1.5 text-xs font-medium text-teal transition-colors hover:bg-teal/30 disabled:opacity-50"
+                >
+                  {acting ? "Retrying…" : "Confirm re-upload"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRetryConfirm(false)}
+                  disabled={acting}
+                  className={actionBtn}
+                >
+                  Cancel
+                </button>
+              </span>
+            )}
+            {recoveryMsg && (
+              <span className="text-xs text-text-secondary">{recoveryMsg}</span>
             )}
           </div>
         </div>
