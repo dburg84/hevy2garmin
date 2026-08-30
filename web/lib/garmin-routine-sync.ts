@@ -13,6 +13,7 @@
  */
 import type { GarminClient } from "garmin-auth";
 import { getGarminClient } from "./garmin-upload";
+import { garminDelete } from "./garmin-delete";
 import { routineToGarminWorkout, type HevyRoutine, type WorkoutBuildOptions } from "./garmin-workout";
 import { getDb } from "./db";
 
@@ -90,5 +91,31 @@ export async function scheduleRoutine(
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
     return { status: "error", scheduleId: null, error };
+  }
+}
+
+export interface RoutineUnscheduleResult {
+  status: "unscheduled" | "error";
+  error: string | null;
+}
+
+/** Remove a Garmin calendar entry (workoutScheduleId) and its local record. */
+export async function unscheduleRoutine(
+  hevyRoutineId: string,
+  scheduleId: string,
+  sql: Sql = getDb(),
+  opts: { garminClientFactory?: () => Promise<GarminClient> } = {},
+): Promise<RoutineUnscheduleResult> {
+  try {
+    const client = await (opts.garminClientFactory ?? (() => getGarminClient()))();
+    await garminDelete(client, `/workout-service/schedule/${scheduleId}`);
+    await sql`
+      DELETE FROM routine_schedules
+      WHERE hevy_routine_id = ${hevyRoutineId} AND schedule_id = ${scheduleId}
+    `;
+    return { status: "unscheduled", error: null };
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    return { status: "error", error };
   }
 }
