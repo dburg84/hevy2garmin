@@ -6,6 +6,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-08-30
+
+### Fixed
+- Fresh Vercel + Neon deploys no longer crash with `ModuleNotFoundError: No module named 'psycopg2'` ([#358](https://github.com/drkostas/hevy2garmin/pull/358), closes [#357](https://github.com/drkostas/hevy2garmin/issues/357)). 0.10.0 moved `psycopg2-binary` into the optional `[cloud]` extra to spare self-hosted SQLite installs a database driver, but the Vercel one-click deploy installs the base dependencies (not the extra), so the dashboard died the moment it queried Postgres. `psycopg2-binary` is restored to the base dependencies; it ships prebuilt wheels, so self-hosters take only a small wheel with no compilation.
+
 ## [0.10.0] - 2026-08-28
 
 ### Added
