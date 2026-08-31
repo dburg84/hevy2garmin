@@ -1,26 +1,29 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 /**
- * Tests for POST /api/garmin-login. GarminAuth is mocked, so NO real Garmin SSO
- * runs and no real credentials are ever used.
+ * Tests for POST /api/garmin-login. The login Worker and the token store are
+ * mocked, so NO real Garmin SSO runs and no real credentials are ever used.
  */
 
-const loginMock = vi.fn();
+const workerLogin = vi.fn();
+vi.mock("@/lib/garmin-login-worker", async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  return { ...actual, workerLogin: (...a: unknown[]) => workerLogin(...a) };
+});
+
+const save = vi.fn();
 vi.mock("garmin-auth", () => ({
-  GarminAuth: class {
-    constructor(_o: unknown) {}
-    login() {
-      return loginMock();
-    }
-  },
   DBTokenStore: class {
     constructor(..._a: unknown[]) {}
+    save(...a: unknown[]) {
+      return save(...a);
+    }
   },
-  NEEDS_MFA: "needs_mfa",
 }));
+const resetGarminClient = vi.fn();
 vi.mock("@/lib/garmin-upload", () => ({
   GARMIN_TOKEN_PLATFORM: "garmin_tokens",
-  resetGarminClient: vi.fn(),
+  resetGarminClient: () => resetGarminClient(),
 }));
 
 import { POST } from "./route";
@@ -39,46 +42,70 @@ beforeEach(() => {
 });
 
 describe("POST /api/garmin-login", () => {
-  it("missing email/password → 400, no login attempt", async () => {
-    const res = await POST(req({ email: "", password: "" }));
+  it("400 when email/password missing", async () => {
+    const res = await POST(req({ email: "" }));
     expect(res.status).toBe(400);
-    expect(loginMock).not.toHaveBeenCalled();
+    expect(workerLogin).not.toHaveBeenCalled();
   });
 
-  it("successful login → status connected", async () => {
-    loginMock.mockResolvedValue({ domain: "garmin.com" });
-    const res = await POST(req({ email: "a@b.com", password: "pw" }));
+  it("success → persists nested DI tokens and returns connected", async () => {
+    workerLogin.mockResolvedValue({
+      status: "success",
+      di_token: "a",
+      di_refresh_token: "b",
+      di_client_id: "c",
+    });
+    const res = await POST(req({ email: "me@x.com", password: "pw" }));
     const json = await res.json();
     expect(res.status).toBe(200);
     expect(json.status).toBe("connected");
-    expect(loginMock).toHaveBeenCalledTimes(1);
+    expect(save).toHaveBeenCalledWith({ di_token: "a", di_refresh_token: "b", di_client_id: "c" });
+    expect(resetGarminClient).toHaveBeenCalled();
   });
 
-  it("NEEDS_MFA → status needs_mfa (200, with guidance)", async () => {
-    loginMock.mockResolvedValue("needs_mfa");
-    const res = await POST(req({ email: "a@b.com", password: "pw" }));
+  it("success but DATABASE_URL unset → 503, no store call", async () => {
+    delete process.env.DATABASE_URL;
+    workerLogin.mockResolvedValue({ status: "success", di_token: "a", di_refresh_token: "b", di_client_id: "c" });
+    const res = await POST(req({ email: "me@x.com", password: "pw" }));
+    expect(res.status).toBe(503);
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it("needs_mfa → passes session_id through, no persistence", async () => {
+    workerLogin.mockResolvedValue({ status: "needs_mfa", session_id: "s1", mfa_method: "TOTP" });
+    const res = await POST(req({ email: "me@x.com", password: "pw" }));
     const json = await res.json();
     expect(res.status).toBe(200);
     expect(json.status).toBe("needs_mfa");
-    expect(json.error).toMatch(/two-factor|verification/i);
+    expect(json.session_id).toBe("s1");
+    expect(save).not.toHaveBeenCalled();
   });
 
-  it("login throws (bad creds / blocked) → 502 error", async () => {
-    loginMock.mockRejectedValue(new Error("SSO rejected"));
-    const res = await POST(req({ email: "a@b.com", password: "pw" }));
+  it("invalid_credentials → 401", async () => {
+    workerLogin.mockResolvedValue({ status: "invalid_credentials" });
+    const res = await POST(req({ email: "me@x.com", password: "bad" }));
+    expect(res.status).toBe(401);
+    expect((await res.json()).status).toBe("invalid_credentials");
+  });
+
+  it("rate_limited → 429 with a human retry hint", async () => {
+    workerLogin.mockResolvedValue({ status: "rate_limited", retry_after_seconds: 120 });
+    const res = await POST(req({ email: "me@x.com", password: "pw" }));
     const json = await res.json();
-    expect(res.status).toBe(502);
-    expect(json.status).toBe("error");
+    expect(res.status).toBe(429);
+    expect(json.error).toMatch(/2 min/);
   });
 
-  it("invalid JSON → 400", async () => {
-    const bad = new Request("http://h/api/garmin-login", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: "{no",
-    });
-    const res = await POST(bad);
-    expect(res.status).toBe(400);
-    expect(loginMock).not.toHaveBeenCalled();
+  it("needs_captcha → 409", async () => {
+    workerLogin.mockResolvedValue({ status: "needs_captcha" });
+    const res = await POST(req({ email: "me@x.com", password: "pw" }));
+    expect(res.status).toBe(409);
+  });
+
+  it("error → 502 carrying the worker message", async () => {
+    workerLogin.mockResolvedValue({ status: "error", message: "boom" });
+    const res = await POST(req({ email: "me@x.com", password: "pw" }));
+    expect(res.status).toBe(502);
+    expect((await res.json()).error).toBe("boom");
   });
 });
