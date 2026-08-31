@@ -32,6 +32,11 @@ interface DashboardData {
   garminConnected: boolean;
   totalSynced: number;
   syncedThisWeek: number;
+  markedSynced: number;
+  skipped: number;
+  pending: number;
+  routinesSynced: number;
+  routinesScheduled: number;
   recent: RecentWorkout[];
   syncLog: SyncLogEntry[];
   autoSyncEnabled: boolean;
@@ -43,6 +48,11 @@ const EMPTY: DashboardData = {
   garminConnected: false,
   totalSynced: 0,
   syncedThisWeek: 0,
+  markedSynced: 0,
+  skipped: 0,
+  pending: 0,
+  routinesSynced: 0,
+  routinesScheduled: 0,
   recent: [],
   syncLog: [],
   autoSyncEnabled: false,
@@ -58,7 +68,7 @@ async function loadDashboard(): Promise<DashboardData> {
 
   // Every query is guarded so a missing/empty table degrades to a sane default
   // rather than crashing the whole page render.
-  const [connected, counts, recent, syncLog, autoSync] = await Promise.all([
+  const [connected, counts, recent, syncLog, autoSync, pendingRow, routinesRow] = await Promise.all([
     sql`
       SELECT platform, status
       FROM platform_credentials
@@ -70,9 +80,11 @@ async function loadDashboard(): Promise<DashboardData> {
         count(*) FILTER (
           WHERE COALESCE(status, 'success') = 'success'
             AND synced_at >= (now() - interval '7 days')
-        )::int AS week
+        )::int AS week,
+        count(*) FILTER (WHERE status = 'manual')::int AS marked,
+        count(*) FILTER (WHERE status = 'skipped')::int AS skipped
       FROM synced_workouts
-    `.catch(() => [] as Array<{ total: number; week: number }>),
+    `.catch(() => [] as Array<{ total: number; week: number; marked: number; skipped: number }>),
     sql`
       SELECT hevy_id, title, synced_at, calories, avg_hr,
              garmin_activity_id, COALESCE(status, 'success') AS status
@@ -89,6 +101,15 @@ async function loadDashboard(): Promise<DashboardData> {
     sql`
       SELECT value FROM app_cache WHERE key = 'auto_sync' LIMIT 1
     `.catch(() => [] as Array<{ value: unknown }>),
+    sql`SELECT count(*)::int AS n FROM pending_uploads`.catch(() => [] as Array<{ n: number }>),
+    sql`
+      SELECT
+        count(*)::int AS total,
+        count(*) FILTER (
+          WHERE hevy_routine_id IN (SELECT DISTINCT hevy_routine_id FROM routine_schedules)
+        )::int AS scheduled
+      FROM synced_routines
+    `.catch(() => [] as Array<{ total: number; scheduled: number }>),
   ]);
 
   const autoSyncValue =
@@ -108,6 +129,11 @@ async function loadDashboard(): Promise<DashboardData> {
       recent.some((r) => r.garmin_activity_id != null),
     totalSynced: counts[0]?.total ?? 0,
     syncedThisWeek: counts[0]?.week ?? 0,
+    markedSynced: counts[0]?.marked ?? 0,
+    skipped: counts[0]?.skipped ?? 0,
+    pending: pendingRow[0]?.n ?? 0,
+    routinesSynced: routinesRow[0]?.total ?? 0,
+    routinesScheduled: routinesRow[0]?.scheduled ?? 0,
     recent: recent.map((r) => ({
       hevy_id: r.hevy_id,
       title: r.title ?? "",
@@ -217,10 +243,30 @@ export default async function DashboardPage() {
       </section>
 
       {/* Stat cards */}
-      <section className="mb-8 grid grid-cols-2 gap-3">
-        <StatCard label="Total synced" value={data.totalSynced} accent="text-teal" />
-        <StatCard label="Synced this week" value={data.syncedThisWeek} accent="text-warm" />
+      <section className="mb-8 grid grid-cols-2 gap-3 sm:grid-cols-3">
+        <StatCard label="On Garmin" value={data.totalSynced} accent="text-teal" />
+        <StatCard label="Marked synced" value={data.markedSynced} accent="text-warm" />
+        <StatCard label="Skipped" value={data.skipped} accent="text-text-muted" />
+        <StatCard label="Pending" value={data.pending} accent="text-warm" />
+        <StatCard label="Routines synced" value={data.routinesSynced} accent="text-teal" />
+        <StatCard label="Synced this week" value={data.syncedThisWeek} accent="text-text-secondary" />
       </section>
+
+      {data.routinesSynced > 0 && (
+        <section className="mb-8">
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-surface-elevated p-4">
+            <div>
+              <h3 className="text-sm font-semibold text-text">Routines</h3>
+              <p className="mt-0.5 text-xs text-text-muted tabular-nums">
+                {data.routinesSynced} synced · {data.routinesScheduled} scheduled
+              </p>
+            </div>
+            <a href="/routines" className="text-xs font-medium text-teal underline">
+              Manage →
+            </a>
+          </div>
+        </section>
+      )}
 
       {/* Sync controls (preview is dry-run; live upload is gated) */}
       <SyncPanel ready={data.hevyConnected && data.garminConnected} />
