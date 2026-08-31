@@ -128,6 +128,8 @@ export default async function SettingsPage() {
   const hrFusion = cfg("hr_fusion");
   const merge = cfg("merge_settings");
   const profile = cfg("user_profile");
+  const timing = cfg("timing");
+  const numOrNull = (v: unknown): number | null => (v == null || v === "" ? null : Number(v));
 
   return (
     <main className="mx-auto max-w-5xl px-4 py-8 md:px-6">
@@ -200,7 +202,20 @@ export default async function SettingsPage() {
           autoSyncInterval={Number(autoSync.interval_minutes) || 120}
           hrFusionEnabled={hrFusion.enabled == null ? true : Boolean(hrFusion.enabled)}
           mergeWatchStrategy={String(merge.merge_watch_strategy ?? "merge")}
-          weightKg={profile.weight_kg != null ? Number(profile.weight_kg) : null}
+          weightKg={numOrNull(profile.weight_kg)}
+          birthYear={numOrNull(profile.birth_year)}
+          sex={profile.sex != null ? String(profile.sex) : null}
+          vo2max={numOrNull(profile.vo2max)}
+          timezone={profile.timezone != null ? String(profile.timezone) : null}
+          mergeMode={Boolean(merge.merge_mode)}
+          descriptionEnabled={Boolean(merge.description_enabled)}
+          mergeOverlapPct={numOrNull(merge.merge_overlap_pct)}
+          mergeMaxDriftMin={numOrNull(merge.merge_max_drift_min)}
+          mergeActivityTypes={Array.isArray(merge.merge_activity_types) ? (merge.merge_activity_types as unknown[]).map(String) : []}
+          workingSetSeconds={numOrNull(timing.working_set_seconds)}
+          warmupSetSeconds={numOrNull(timing.warmup_set_seconds)}
+          restBetweenSetsSeconds={numOrNull(timing.rest_between_sets_seconds)}
+          restBetweenExercisesSeconds={numOrNull(timing.rest_between_exercises_seconds)}
         />
       </section>
 
