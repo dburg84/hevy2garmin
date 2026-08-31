@@ -40,6 +40,7 @@ interface DashboardData {
   recent: RecentWorkout[];
   syncLog: SyncLogEntry[];
   autoSyncEnabled: boolean;
+  autoSyncInterval: number;
 }
 
 const EMPTY: DashboardData = {
@@ -56,6 +57,7 @@ const EMPTY: DashboardData = {
   recent: [],
   syncLog: [],
   autoSyncEnabled: false,
+  autoSyncInterval: 120,
 };
 
 async function loadDashboard(): Promise<DashboardData> {
@@ -152,6 +154,7 @@ async function loadDashboard(): Promise<DashboardData> {
       trigger: r.trigger ?? "manual",
     })),
     autoSyncEnabled: Boolean(autoSyncValue.enabled),
+    autoSyncInterval: Number(autoSyncValue.interval_minutes) || 120,
   };
 }
 
@@ -242,6 +245,24 @@ export default async function DashboardPage() {
         <ConnectionBadge label="Garmin Connect" connected={data.garminConnected} />
       </section>
 
+      {data.dbConfigured && (!data.hevyConnected || !data.garminConnected) && (
+        <div className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-warm/40 bg-warm/10 p-4">
+          <p className="text-sm text-warm">
+            {!data.hevyConnected && !data.garminConnected
+              ? "Connect Hevy and Garmin to start syncing."
+              : !data.garminConnected
+                ? "Garmin isn't connected — connect it to upload workouts."
+                : "Hevy isn't connected — connect it to pull workouts."}
+          </p>
+          <a
+            href="/setup"
+            className="rounded-lg bg-warm/20 px-3 py-1.5 text-xs font-medium text-warm transition-colors hover:bg-warm/30"
+          >
+            {!data.garminConnected ? "Connect Garmin" : "Connect Hevy"} →
+          </a>
+        </div>
+      )}
+
       {/* Stat cards */}
       <section className="mb-8 grid grid-cols-2 gap-3 sm:grid-cols-3">
         <StatCard label="On Garmin" value={data.totalSynced} accent="text-teal" />
@@ -278,12 +299,19 @@ export default async function DashboardPage() {
       </div>
 
       <div className="mb-8">
-        <AutoSyncToggle enabled={data.autoSyncEnabled} />
+        <AutoSyncToggle enabled={data.autoSyncEnabled} interval={data.autoSyncInterval} />
       </div>
 
       {/* Recent synced workouts */}
       <section className="mb-8">
-        <h2 className="mb-3 text-lg font-semibold text-text">Recent workouts</h2>
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="text-lg font-semibold text-text">Recent workouts</h2>
+          {data.recent.length > 0 && (
+            <a href="/history" className="text-xs font-medium text-teal underline">
+              All →
+            </a>
+          )}
+        </div>
         {data.recent.length === 0 ? (
           <div className="rounded-lg border border-border bg-surface p-6 text-center text-sm text-text-muted">
             No synced workouts yet.
