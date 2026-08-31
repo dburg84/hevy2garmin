@@ -20,6 +20,9 @@ function RoutineRow({ r }: { r: Routine }) {
   const [synced, setSynced] = useState(false);
   const [showSchedule, setShowSchedule] = useState(false);
   const [date, setDate] = useState("");
+  const [recurring, setRecurring] = useState(false);
+  const [weekday, setWeekday] = useState(1); // Mon
+  const [weeks, setWeeks] = useState("4");
 
   async function sync() {
     setBusy("sync");
@@ -44,25 +47,28 @@ function RoutineRow({ r }: { r: Routine }) {
 
   async function schedule() {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      setError("Pick a date first.");
+      setError(recurring ? "Pick a start date first." : "Pick a date first.");
       return;
     }
     setBusy("schedule");
     setError(null);
     setMsg(null);
     try {
+      const payload = recurring
+        ? { mode: "recurring", weekday, start_date: date, weeks: Number.parseInt(weeks || "1", 10) }
+        : { date };
       const res = await fetch(`/api/routines/${encodeURIComponent(r.id)}/schedule`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ date }),
+        body: JSON.stringify(payload),
       });
-      const d = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      const d = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; scheduled?: number; total?: number };
       if (!res.ok || !d.ok) {
         setError(d.error ?? `Request failed (${res.status}).`);
         return;
       }
       setShowSchedule(false);
-      setMsg(`Scheduled for ${date}.`);
+      setMsg(recurring ? `Scheduled ${d.scheduled ?? d.total} weekly sessions.` : `Scheduled for ${date}.`);
       router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -95,22 +101,57 @@ function RoutineRow({ r }: { r: Routine }) {
         </div>
       </div>
       {showSchedule && (
-        <div className="mt-2 flex flex-wrap items-center gap-2">
-          <input
-            type="date"
-            value={date}
-            onChange={(e) => setDate(e.target.value)}
-            className="rounded-lg border border-border bg-surface px-3 py-1.5 text-xs text-text focus:border-teal focus:outline-none"
-          />
-          <button
-            type="button"
-            onClick={schedule}
-            disabled={busy !== null}
-            className="rounded-lg bg-teal/20 px-3 py-1.5 text-xs font-medium text-teal transition-colors hover:bg-teal/30 disabled:opacity-50"
-          >
-            {busy === "schedule" ? "Scheduling…" : "Add to calendar"}
-          </button>
-          <span className="text-xs text-text-muted">Sync the routine first if you haven&apos;t.</span>
+        <div className="mt-2 space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="text-xs text-text-muted">{recurring ? "Start date" : "Date"}</label>
+            <input
+              type="date"
+              value={date}
+              onChange={(e) => setDate(e.target.value)}
+              className="rounded-lg border border-border bg-surface px-3 py-1.5 text-xs text-text focus:border-teal focus:outline-none"
+            />
+            <label className="flex items-center gap-1.5 text-xs text-text-secondary">
+              <input type="checkbox" checked={recurring} onChange={(e) => setRecurring(e.target.checked)} className="h-3.5 w-3.5 accent-teal" />
+              Repeat weekly
+            </label>
+          </div>
+          {recurring && (
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="text-xs text-text-muted">on</label>
+              <select
+                value={weekday}
+                onChange={(e) => setWeekday(Number.parseInt(e.target.value, 10))}
+                aria-label="Weekday"
+                className="rounded-lg border border-border bg-surface px-2 py-1.5 text-xs text-text focus:border-teal focus:outline-none"
+              >
+                {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d, i) => (
+                  <option key={d} value={i}>{d}</option>
+                ))}
+              </select>
+              <label className="text-xs text-text-muted">for</label>
+              <input
+                type="number"
+                min={1}
+                max={52}
+                value={weeks}
+                onChange={(e) => setWeeks(e.target.value)}
+                aria-label="Weeks"
+                className="w-16 rounded-lg border border-border bg-surface px-2 py-1.5 text-xs text-text focus:border-teal focus:outline-none"
+              />
+              <span className="text-xs text-text-muted">weeks</span>
+            </div>
+          )}
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={schedule}
+              disabled={busy !== null}
+              className="rounded-lg bg-teal/20 px-3 py-1.5 text-xs font-medium text-teal transition-colors hover:bg-teal/30 disabled:opacity-50"
+            >
+              {busy === "schedule" ? "Scheduling…" : recurring ? "Add weekly" : "Add to calendar"}
+            </button>
+            <span className="text-xs text-text-muted">Sync the routine first if you haven&apos;t.</span>
+          </div>
         </div>
       )}
       {msg && !error && <div className="mt-1.5 text-xs text-success">{msg}</div>}
