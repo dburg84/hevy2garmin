@@ -44,7 +44,7 @@ export function PipelineDiagram({ mappingCount }: { mappingCount?: number }) {
 
       <div className="overflow-x-auto">
         <svg
-          viewBox="0 0 852 214"
+          viewBox="0 0 852 352"
           role="img"
           aria-label="Hevy fetches the workout, exercises are mapped to Garmin FIT categories, a FIT file is generated with heart-rate and calories, and it is uploaded to Garmin. In a loop, Garmin's daily heart-rate is matched to the workout and its calories are computed, feeding back into the FIT."
           className="block h-auto w-full min-w-[600px]"
