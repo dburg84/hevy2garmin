@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 interface Routine {
   id: string;
@@ -128,11 +128,23 @@ function RoutineRow({ r }: { r: Routine }) {
  * workout) and "Schedule" (add it to a calendar date). Fetches /api/hevy-routines
  * (read-only) on mount; degrades quietly when Hevy is unreachable.
  */
+interface BulkState {
+  running: boolean;
+  total: number;
+  synced: number;
+  failed: number;
+  done: boolean;
+}
+
 export function HevyRoutinesList() {
+  const router = useRouter();
   const [phase, setPhase] = useState<"loading" | "ready">("loading");
   const [routines, setRoutines] = useState<Routine[]>([]);
   const [note, setNote] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  const [bulk, setBulk] = useState<BulkState | null>(null);
+  const [confirmAll, setConfirmAll] = useState(false);
+  const stopRef = useRef(false);
 
   useEffect(() => {
     let alive = true;
@@ -158,21 +170,94 @@ export function HevyRoutinesList() {
     ? routines.filter((r) => r.title.toLowerCase().includes(query.trim().toLowerCase()))
     : routines;
 
+  // Sync every (filtered) routine to Garmin, one at a time, with live progress.
+  // Each iteration is a real Garmin planned-workout write, so it's confirmed first.
+  async function syncAll() {
+    setConfirmAll(false);
+    const list = filtered;
+    if (list.length === 0) return;
+    stopRef.current = false;
+    let synced = 0;
+    let failed = 0;
+    setBulk({ running: true, total: list.length, synced, failed, done: false });
+    for (const r of list) {
+      if (stopRef.current) break;
+      try {
+        const res = await fetch(`/api/routines/${encodeURIComponent(r.id)}/sync`, { method: "POST" });
+        const d = (await res.json().catch(() => ({}))) as { ok?: boolean };
+        if (res.ok && d.ok) synced += 1;
+        else failed += 1;
+      } catch {
+        failed += 1;
+      }
+      setBulk({ running: true, total: list.length, synced, failed, done: false });
+    }
+    setBulk({ running: false, total: list.length, synced, failed, done: true });
+    router.refresh();
+  }
+
+  const bulkPct = bulk && bulk.total ? Math.round(((bulk.synced + bulk.failed) / bulk.total) * 100) : 0;
+
   return (
     <section className="mb-8">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         <h2 className="text-lg font-semibold text-text">Your Hevy routines</h2>
-        {routines.length > 0 && (
-          <input
-            type="search"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search routines…"
-            aria-label="Search routines"
-            className="w-full max-w-xs rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text focus:border-teal focus:outline-none"
-          />
-        )}
+        <div className="flex flex-wrap items-center gap-2">
+          {routines.length > 0 && (
+            <input
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search routines…"
+              aria-label="Search routines"
+              className="w-full max-w-xs rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text focus:border-teal focus:outline-none"
+            />
+          )}
+          {routines.length > 0 &&
+            (bulk?.running ? (
+              <button
+                type="button"
+                onClick={() => { stopRef.current = true; }}
+                className="rounded-lg border border-warm/50 px-3 py-2 text-xs font-medium text-warm hover:bg-warm/15"
+              >
+                Stop
+              </button>
+            ) : !confirmAll ? (
+              <button
+                type="button"
+                onClick={() => setConfirmAll(true)}
+                className="rounded-lg bg-teal/20 px-3 py-2 text-xs font-medium text-teal hover:bg-teal/30"
+              >
+                Sync all
+              </button>
+            ) : (
+              <span className="flex items-center gap-2">
+                <span className="text-xs text-text-muted">Sync {filtered.length} to Garmin?</span>
+                <button type="button" onClick={syncAll} className="rounded-lg bg-teal px-3 py-2 text-xs font-medium text-black">
+                  Start
+                </button>
+                <button type="button" onClick={() => setConfirmAll(false)} className="text-xs text-text-muted underline">
+                  Cancel
+                </button>
+              </span>
+            ))}
+        </div>
       </div>
+
+      {bulk && (
+        <div className="mb-3" aria-live="polite">
+          <div className="h-2 w-full overflow-hidden rounded-full bg-surface-active">
+            <div className="h-full rounded-full bg-teal transition-all" style={{ width: `${bulkPct}%` }} role="progressbar" aria-valuenow={bulkPct} aria-valuemin={0} aria-valuemax={100} />
+          </div>
+          <p className="mt-1.5 text-xs text-text-secondary tabular-nums">
+            {bulk.done ? "Done — " : "Syncing — "}
+            <span className="text-success">{bulk.synced} synced</span>
+            {bulk.failed > 0 && <span className="text-danger"> · {bulk.failed} failed</span>}
+            {" of "}
+            {bulk.total}
+          </p>
+        </div>
+      )}
       {phase === "loading" ? (
         <div className="rounded-lg border border-border bg-surface p-6 text-center text-sm text-text-muted">
           Loading routines from Hevy…
