@@ -76,7 +76,7 @@ export default async function MappingsPage() {
       )}
 
       {/* Add a custom mapping */}
-      <section className="mb-8">
+      <section className="mb-8" id="mapping-form">
         <h2 className="mb-3 text-lg font-semibold text-text">
           Add a custom mapping
         </h2>

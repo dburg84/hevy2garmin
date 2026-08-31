@@ -1,6 +1,7 @@
 "use client";
 
 import { Fragment, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { categoryName } from "@/lib/garmin-categories";
 
 interface Entry {
@@ -23,8 +24,18 @@ export function MappingsTable({
   builtin: Array<{ name: string; category: number; subcategory: number }>;
   custom: Array<{ name: string; category: number; subcategory: number }>;
 }) {
+  const router = useRouter();
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState<string | null>(null);
+
+  function override(e: Entry) {
+    router.replace(
+      `/mappings?edit=${encodeURIComponent(e.name)}&cat=${e.category}&sub=${e.subcategory}`,
+    );
+    if (typeof document !== "undefined") {
+      document.getElementById("mapping-form")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }
 
   const entries = useMemo<Entry[]>(() => {
     const byName = new Map<string, Entry>();
@@ -120,6 +131,13 @@ export function MappingsTable({
                               ? "This custom mapping overrides the built-in map for this exact Hevy exercise name."
                               : "Built-in mapping. Add a custom mapping above to override it."}
                           </p>
+                          <button
+                            type="button"
+                            onClick={() => override(e)}
+                            className="mt-2 rounded-lg border border-border px-2.5 py-1 text-xs font-medium text-teal transition-colors hover:bg-surface-active"
+                          >
+                            {e.source === "custom" ? "Edit" : "Override"}
+                          </button>
                         </td>
                       </tr>
                     )}
