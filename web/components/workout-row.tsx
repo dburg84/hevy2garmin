@@ -235,13 +235,36 @@ export function WorkoutRow({ item }: { item: WorkoutItem }) {
   }
 
   return (
-    <li className="px-4 py-3">
+    <li className={`px-4 py-3 ${item.kind === "terminal" ? "opacity-70" : ""}`}>
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           <div className="truncate text-sm font-medium text-text">{item.title || "Untitled workout"}</div>
           <div className="mt-0.5 text-xs text-text-muted">
             {fmtDate(item.when)}
-            {item.garmin_activity_id && <span> · Garmin {item.garmin_activity_id}</span>}
+            {item.garmin_activity_id && (
+              <>
+                {" · "}
+                <a
+                  href={`https://connect.garmin.com/modern/activity/${item.garmin_activity_id}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-teal underline underline-offset-2 hover:text-teal/80"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  Garmin {item.garmin_activity_id}
+                </a>
+              </>
+            )}
+            {" · "}
+            <a
+              href={`https://hevy.com/workout/${item.hevy_id}`}
+              target="_blank"
+              rel="noreferrer"
+              className="text-text-secondary underline underline-offset-2 hover:text-text"
+              onClick={(e) => e.stopPropagation()}
+            >
+              Hevy
+            </a>
             {item.detail && <span className="text-text-secondary"> · {item.detail}</span>}
           </div>
         </div>
