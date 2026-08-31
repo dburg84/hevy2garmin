@@ -1,5 +1,6 @@
 import { getDb } from "@/lib/db";
 import { SyncPanel } from "@/components/sync-panel";
+import { SyncLoop } from "@/components/sync-loop";
 import { BatchSync } from "@/components/batch-sync";
 import { AutoSyncToggle } from "@/components/autosync-toggle";
 
@@ -223,7 +224,12 @@ export default async function DashboardPage() {
 
       {/* Sync controls (preview is dry-run; live upload is gated) */}
       <SyncPanel ready={data.hevyConnected && data.garminConnected} />
-      <BatchSync ready={data.hevyConnected && data.garminConnected} />
+      <div className="mt-3">
+        <SyncLoop ready={data.hevyConnected && data.garminConnected} />
+      </div>
+      <div className="mt-3">
+        <BatchSync ready={data.hevyConnected && data.garminConnected} />
+      </div>
 
       <div className="mb-8">
         <AutoSyncToggle enabled={data.autoSyncEnabled} />
