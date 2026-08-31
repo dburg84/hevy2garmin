@@ -87,16 +87,30 @@ export async function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
   if (STATIC_PREFIX.test(pathname)) return NextResponse.next();
   if (!authEnabled()) return NextResponse.next();
+  const cookie = req.cookies.get(SESSION_COOKIE)?.value ?? null;
+  const authed = await verifySession(cookie);
+
+  // Already signed in and hitting /login → bounce to the dashboard (or ?next=),
+  // mirroring the Python GET /login redirect-when-authenticated.
+  if (pathname === "/login" && authed) {
+    const url = req.nextUrl.clone();
+    const next = req.nextUrl.searchParams.get("next");
+    url.pathname = next && next.startsWith("/") && !next.startsWith("//") ? next : "/dashboard";
+    url.search = "";
+    return NextResponse.redirect(url);
+  }
+
   if (PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`))) {
     return NextResponse.next();
   }
-  const cookie = req.cookies.get(SESSION_COOKIE)?.value ?? null;
-  if (await verifySession(cookie)) return NextResponse.next();
+  if (authed) return NextResponse.next();
   if (pathname.startsWith("/api/")) {
     return new NextResponse("Unauthorized", { status: 401 });
   }
+  // Gate the page and remember where the user was headed (?next=, relative-only).
   const url = req.nextUrl.clone();
   url.pathname = "/login";
+  url.search = `?next=${encodeURIComponent(pathname + req.nextUrl.search)}`;
   return NextResponse.redirect(url);
 }
 
