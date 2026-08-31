@@ -1,6 +1,7 @@
 import { getDb } from "@/lib/db";
 import { SettingsForm } from "@/components/settings-form";
 import { DangerZone } from "@/components/danger-zone";
+import { SessionsCard } from "@/components/sessions-card";
 import { ScanDuplicates } from "@/components/scan-duplicates";
 
 // Queries the live hevy2garmin Postgres per request — never at build time.
@@ -261,6 +262,12 @@ export default async function SettingsPage() {
             ))}
           </div>
         )}
+      </section>
+
+      {/* Sessions & security */}
+      <section className="mt-8">
+        <h2 className="mb-3 text-lg font-semibold text-text">Sessions &amp; security</h2>
+        <SessionsCard />
       </section>
 
       {/* Maintenance */}
