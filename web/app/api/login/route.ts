@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { checkPassword, signSession, SESSION_COOKIE, authEnabled } from "@/lib/auth";
 import { getDb } from "@/lib/db";
+import { getSessionEpoch } from "@/lib/session-epoch";
 import { lockoutRemaining, recordFailure, clearFailures, formatCooldown } from "@/lib/login-ratelimit";
 
 export const runtime = "nodejs";
@@ -67,8 +68,11 @@ export async function POST(req: Request) {
 
   if (sql) await clearFailures(sql, key);
 
+  // Sign with the current epoch so the cookie survives until the next
+  // "sign out everywhere". No DB → epoch 0 (a v2 cookie that a later bump revokes).
+  const epoch = sql ? await getSessionEpoch(sql) : 0;
   const res = NextResponse.json({ ok: true, next });
-  res.cookies.set(SESSION_COOKIE, await signSession(), {
+  res.cookies.set(SESSION_COOKIE, await signSession(epoch), {
     httpOnly: true,
     sameSite: "strict",
     secure: process.env.NODE_ENV === "production",
