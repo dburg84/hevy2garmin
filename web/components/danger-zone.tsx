@@ -21,7 +21,11 @@ export function DangerZone({ syncedCount }: { syncedCount: number }) {
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch("/api/unsync-all", { method: "POST" });
+      const res = await fetch("/api/unsync-all", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: "RESET" }),
+      });
       const d = (await res.json().catch(() => ({}))) as { ok?: boolean; count?: number; error?: string };
       if (!res.ok || !d.ok) {
         setError(d.error ?? `Request failed (${res.status}).`);
