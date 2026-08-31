@@ -11,12 +11,23 @@
  *   HR loop: Garmin daily HR → matched to the workout → calories → into the FIT.
  */
 
-const STAGES = [
+interface Stage {
+  key: string;
+  x: number;
+  w: number;
+  title: string;
+  sub: string;
+  dynamic?: boolean;
+  a: string;
+  b: string;
+}
+
+const STAGES: Stage[] = [
   { key: "hevy", x: 8, w: 184, title: "Hevy API", sub: "Fetch workouts", a: "#6366f1", b: "#818cf8" },
-  { key: "map", x: 224, w: 184, title: "Map exercises", subDynamic: true, a: "#a855f7", b: "#c084fc" },
+  { key: "map", x: 224, w: 184, title: "Map exercises", sub: "", dynamic: true, a: "#a855f7", b: "#c084fc" },
   { key: "fit", x: 440, w: 184, title: "Generate FIT", sub: "+ HR + calories", a: "#f59e0b", b: "#fbbf24" },
   { key: "garmin", x: 656, w: 184, title: "Garmin", sub: "Upload activity", a: "#00875a", b: "#34d399" },
-] as const;
+];
 
 const ROSE = "#f43f5e";
 const ROSE_LIGHT = "#fb7185";
@@ -81,7 +92,7 @@ export function PipelineDiagram({ mappingCount }: { mappingCount?: number }) {
               <rect x={s.x} y="14" width={s.w} height="4" rx="2" fill={s.a} />
               <text x={s.x + s.w / 2} y="45" textAnchor="middle" fontSize="14" fontWeight="700" fill={s.b}>{s.title}</text>
               <text x={s.x + s.w / 2} y="63" textAnchor="middle" fontSize="11" fill="#94a3b8">
-                {"subDynamic" in s && s.subDynamic ? mapSub : s.sub}
+                {s.dynamic ? mapSub : s.sub}
               </text>
             </g>
           ))}
