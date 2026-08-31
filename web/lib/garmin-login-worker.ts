@@ -43,12 +43,16 @@ export interface WorkerLoginResult {
   message?: string;
 }
 
-/** DI tokens as garmin-auth's DBTokenStore.save() expects them. */
-export interface GarminDiTokens {
+/**
+ * DI tokens as garmin-auth's DBTokenStore.save() expects them. A `type` alias
+ * (not an interface) so it's assignable to the store's `Record<string,unknown>`
+ * parameter — interfaces lack the implicit index signature that grants that.
+ */
+export type GarminDiTokens = {
   di_token: string;
   di_refresh_token: string;
   di_client_id: string;
-}
+};
 
 export type FetchImpl = (
   input: string,
