@@ -132,6 +132,7 @@ export function HevyRoutinesList() {
   const [phase, setPhase] = useState<"loading" | "ready">("loading");
   const [routines, setRoutines] = useState<Routine[]>([]);
   const [note, setNote] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
 
   useEffect(() => {
     let alive = true;
@@ -153,9 +154,25 @@ export function HevyRoutinesList() {
     };
   }, []);
 
+  const filtered = query.trim()
+    ? routines.filter((r) => r.title.toLowerCase().includes(query.trim().toLowerCase()))
+    : routines;
+
   return (
     <section className="mb-8">
-      <h2 className="mb-3 text-lg font-semibold text-text">Your Hevy routines</h2>
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-lg font-semibold text-text">Your Hevy routines</h2>
+        {routines.length > 0 && (
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search routines…"
+            aria-label="Search routines"
+            className="w-full max-w-xs rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text focus:border-teal focus:outline-none"
+          />
+        )}
+      </div>
       {phase === "loading" ? (
         <div className="rounded-lg border border-border bg-surface p-6 text-center text-sm text-text-muted">
           Loading routines from Hevy…
@@ -164,12 +181,21 @@ export function HevyRoutinesList() {
         <div className="rounded-lg border border-border bg-surface p-6 text-center text-sm text-text-muted">
           {note ? `Couldn't load routines: ${note}` : "No routines found in Hevy."}
         </div>
+      ) : filtered.length === 0 ? (
+        <div className="rounded-lg border border-border bg-surface p-6 text-center text-sm text-text-muted">
+          No routines match “{query}”.
+        </div>
       ) : (
-        <ul className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-surface-elevated">
-          {routines.map((r) => (
-            <RoutineRow key={r.id} r={r} />
-          ))}
-        </ul>
+        <>
+          <ul className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-surface-elevated">
+            {filtered.map((r) => (
+              <RoutineRow key={r.id} r={r} />
+            ))}
+          </ul>
+          <p className="mt-2 text-xs text-text-muted tabular-nums">
+            {filtered.length} of {routines.length} routine{routines.length === 1 ? "" : "s"}
+          </p>
+        </>
       )}
     </section>
   );
