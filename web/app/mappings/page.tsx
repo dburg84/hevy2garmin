@@ -6,6 +6,7 @@ import {
 } from "@/lib/garmin-categories";
 import { DeleteMappingButton, MappingForm } from "@/components/mapping-form";
 import { MappingsTable } from "@/components/mappings-table";
+import { UnmappedCard } from "@/components/unmapped-card";
 
 // Queries the live hevy2garmin Postgres per request — never at build time.
 export const dynamic = "force-dynamic";
@@ -74,6 +75,9 @@ export default async function MappingsPage() {
           unavailable; the built-in map below still works.
         </div>
       )}
+
+      {/* Unmapped exercises (from recent Hevy workouts) */}
+      <UnmappedCard categories={CATEGORY_OPTIONS} />
 
       {/* Add a custom mapping */}
       <section className="mb-8" id="mapping-form">
