@@ -26,7 +26,7 @@ from hevy2garmin.db_interface import NoWritableDatabaseError
 from hevy2garmin.auth import (
     auth_enabled, verify_session, sign_session, check_password, SESSION_COOKIE, session_ttl,
 )
-from hevy2garmin.config import is_configured, load_config, save_config
+from hevy2garmin.config import get_github_pat, is_configured, load_config, save_config
 from hevy2garmin.demo import is_demo_mode
 from hevy2garmin.ratelimit import record_rate_limit, cooldown_remaining, clear_rate_limit, format_cooldown
 from hevy2garmin.sync import (
@@ -1199,6 +1199,35 @@ async def history_page(request: Request):
     return _render("history.html", total=db.get_synced_count(), history=db.get_recent_synced(50))
 
 
+def _save_github_pat(pat: str) -> None:
+    """Persist the GitHub PAT to the DB (platform 'github') on cloud deployments.
+
+    Mirrors how the setup form stores Hevy and Garmin credentials, so auto-sync
+    can read the token without a Vercel environment variable (#445). A no-op
+    locally, where the token comes from the environment.
+    """
+    pat = (pat or "").strip()
+    if not pat or not db.get_database_url():
+        return
+    try:
+        import json as _json
+        _db = db.get_db()
+        if hasattr(_db, "_get_conn"):
+            with _db._get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO platform_credentials (platform, auth_type, credentials, status)
+                        VALUES ('github', 'pat', %s, 'active')
+                        ON CONFLICT (platform) DO UPDATE SET credentials = EXCLUDED.credentials, status = 'active'
+                        """,
+                        (_json.dumps({"pat": pat}),),
+                    )
+                conn.commit()
+    except Exception as e:
+        logger.warning("Failed to persist GitHub PAT to DB: %s", e)
+
+
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
     config = load_config()
@@ -1212,12 +1241,13 @@ async def settings_page(request: Request):
     merge_extra_types = ", ".join(
         t for t in config.get("merge_activity_types", ["strength_training"]) if t != "strength_training"
     )
-    return _render("settings.html", config=config, unmapped=sorted(unmapped.items(), key=lambda x: -x[1]), merge_extra_types=merge_extra_types, err=request.query_params.get("err"))
+    return _render("settings.html", config=config, unmapped=sorted(unmapped.items(), key=lambda x: -x[1]), merge_extra_types=merge_extra_types, github_pat_set=bool(get_github_pat()), err=request.query_params.get("err"))
 
 
 @app.post("/settings")
 async def settings_save(
     hevy_api_key: str = Form(""), garmin_email: str = Form(""), garmin_password: str = Form(""),
+    github_pat: str = Form(""),
     weight_kg: float = Form(80.0), birth_year: int = Form(1990), sex: str = Form("male"), vo2max: float = Form(45.0),
     timezone: str = Form(""),
     working_set_seconds: int = Form(40), warmup_set_seconds: int = Form(25),
@@ -1282,6 +1312,11 @@ async def settings_save(
             })
         except Exception as e:
             logger.warning("Failed to persist settings to DB: %s", e)
+
+    # The GitHub token is only needed for auto-sync, and only stored on cloud
+    # (locally it comes from the environment). Blank means "keep current" (#445).
+    if github_pat.strip():
+        _save_github_pat(github_pat)
 
     return RedirectResponse("/settings", status_code=303)
 
@@ -1466,8 +1501,13 @@ async def api_sync(request: Request):
         return JSONResponse({"status": "demo", "message": "Sync disabled in demo mode"})
 
     # If GitHub PAT + repo are set (Vercel deploy), trigger sync via GitHub Actions
-    github_pat = os.environ.get("GITHUB_PAT")
+    github_pat = get_github_pat()
     github_repo = os.environ.get("GITHUB_REPO")
+    if not github_repo:
+        _owner = os.environ.get("VERCEL_GIT_REPO_OWNER")
+        _slug = os.environ.get("VERCEL_GIT_REPO_SLUG")
+        if _owner and _slug:
+            github_repo = f"{_owner}/{_slug}"
     if github_pat and github_repo:
         import requests as req
 
@@ -2060,6 +2100,16 @@ async def api_toggle_autosync(request: Request):
     if interval not in (30, 60, 120, 240, 360, 720, 1440):
         interval = 120
 
+    # On Vercel, auto-sync runs through GitHub Actions and needs a token. Refuse
+    # to enable it without one instead of silently doing nothing (#445). The
+    # token is entered on the Settings page (or as a GITHUB_PAT env var).
+    if enabled and os.environ.get("VERCEL") and not get_github_pat():
+        return _render(
+            "partials/autosync_status.html",
+            auto_sync=autosync.status(),
+            error="Auto-sync needs a GitHub token. Add one in Settings, then turn auto-sync on.",
+        )
+
     config = load_config()
     config.setdefault("auto_sync", {})
     config["auto_sync"]["enabled"] = enabled
@@ -2084,7 +2134,7 @@ async def api_toggle_autosync(request: Request):
             logger.warning("Failed to persist auto-sync state: %s", e)
 
     if enabled:
-        if os.environ.get("VERCEL") and os.environ.get("GITHUB_PAT"):
+        if os.environ.get("VERCEL"):
             ok, msg = await _setup_github_actions(interval_minutes=interval)
             if ok:
                 logger.info("GitHub Actions auto-sync configured (interval=%dmin)", interval)
@@ -2096,10 +2146,10 @@ async def api_toggle_autosync(request: Request):
     else:
         autosync.stop()
         # On Vercel: delete the sync workflow to stop the cron
-        if os.environ.get("VERCEL") and os.environ.get("GITHUB_PAT"):
+        pat = get_github_pat()
+        if os.environ.get("VERCEL") and pat:
             try:
                 import requests as req
-                pat = os.environ.get("GITHUB_PAT")
                 owner = os.environ.get("VERCEL_GIT_REPO_OWNER")
                 repo_name = os.environ.get("VERCEL_GIT_REPO_SLUG")
                 gh_headers = {"Authorization": f"Bearer {pat}", "Accept": "application/vnd.github+json"}
@@ -2193,13 +2243,13 @@ async def _setup_github_actions(interval_minutes: int = 120) -> tuple[bool, str]
     import asyncio
     from base64 import b64encode
 
-    pat = os.environ.get("GITHUB_PAT")
+    pat = get_github_pat()
     owner = os.environ.get("VERCEL_GIT_REPO_OWNER")
     repo = os.environ.get("VERCEL_GIT_REPO_SLUG")
     database_url = db.get_database_url()
 
     if not pat:
-        return False, "GITHUB_PAT not set"
+        return False, "GitHub token not set"
     if not owner or not repo:
         return False, "Not deployed via Vercel (missing repo info)"
     if not database_url:
