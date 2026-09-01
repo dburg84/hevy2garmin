@@ -199,6 +199,40 @@ def is_configured() -> bool:
     return True
 
 
+def get_github_pat() -> str | None:
+    """Return the GitHub personal access token, DB value taking precedence.
+
+    On cloud deployments the token is saved in ``platform_credentials`` (platform
+    ``github``) from the Settings page, so a fresh Vercel deploy no longer needs
+    it as an environment variable. Falls back to the ``GITHUB_PAT`` env var for
+    local, Docker, and CI use. Returns ``None`` when neither is set.
+    """
+    import os
+
+    from hevy2garmin.db import get_database_url, get_db
+
+    if get_database_url():
+        try:
+            _db = get_db()
+            if hasattr(_db, "_get_conn"):
+                with _db._get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT credentials FROM platform_credentials WHERE platform = 'github'"
+                        )
+                        row = cur.fetchone()
+                if row is not None:
+                    creds = row["credentials"] if isinstance(row["credentials"], dict) else json.loads(row["credentials"])
+                    pat = (creds or {}).get("pat")
+                    if pat and pat.strip():
+                        return pat.strip()
+        except Exception:
+            pass
+
+    env_pat = os.environ.get("GITHUB_PAT")
+    return env_pat.strip() if env_pat and env_pat.strip() else None
+
+
 def _deep_merge(base: dict, override: dict) -> None:
     """Merge override into base recursively (mutates base)."""
     for key, value in override.items():
