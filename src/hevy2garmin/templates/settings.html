@@ -66,6 +66,15 @@
                 <input class="form-input" type="password" id="garmin_password" name="garmin_password" placeholder="Leave blank to keep current">
             </div>
         </div>
+        <div class="form-group" style="margin-top: 12px;">
+            <label class="form-label" for="github_pat">GitHub Token <span style="color: var(--text-muted); font-weight: normal;">(only for auto-sync)</span></label>
+            <input class="form-input" type="password" id="github_pat" name="github_pat" placeholder="{% if github_pat_set %}Saved. Leave blank to keep current{% else %}Paste a token to enable auto-sync{% endif %}">
+            <div style="font-size: 12px; color: var(--text-muted); margin-top: 6px;">
+                Lets hevy2garmin set up scheduled syncing on your fork. Create one with <code>repo</code> and <code>workflow</code> scopes at
+                <a href="https://github.com/settings/tokens/new?scopes=repo,workflow&amp;description=hevy2garmin" target="_blank" rel="noopener">github.com/settings/tokens</a>.
+                Not needed for manual syncing.
+            </div>
+        </div>
     </div>
 
     <!-- Profile Section -->

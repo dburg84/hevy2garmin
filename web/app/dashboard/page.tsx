@@ -4,6 +4,7 @@ import { SyncLoop } from "@/components/sync-loop";
 import { BatchSync } from "@/components/batch-sync";
 import { AutoSyncToggle } from "@/components/autosync-toggle";
 import { PipelineDiagram } from "@/components/pipeline-diagram";
+import { HEVY_TO_GARMIN } from "hevy2garmin";
 
 // Queries the live hevy2garmin Postgres per request — never at build time.
 export const dynamic = "force-dynamic";
@@ -303,7 +304,7 @@ export default async function DashboardPage() {
         <AutoSyncToggle enabled={data.autoSyncEnabled} interval={data.autoSyncInterval} />
       </div>
 
-      <PipelineDiagram />
+      <PipelineDiagram mappingCount={Object.keys(HEVY_TO_GARMIN).length} />
 
       {/* Recent synced workouts */}
       <section className="mb-8">
