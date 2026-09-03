@@ -164,3 +164,38 @@ jobs:
             case "$code" in 2*|3*) echo "GET /login -> $code"; exit 0;; esac
           done
           echo "dashboard did not answer on /login"; cat uvicorn.log; exit 1
+
+  check-fresh-fork-web:
+    # What a forker's Vercel deploy of the Next.js dashboard gets: a strict `npm ci` (a stale
+    # lockfile must FAIL here, not on their first deploy), a build, and a boot with nothing but
+    # a database URL in the environment. Mirror of check-fresh-fork for the web path (#457).
+    name: Fresh fork (web, Vercel-style install)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install exactly from the lockfile (no fallback)
+        run: npm ci
+
+      - name: Build
+        # Routes are force-dynamic; the build must not need a real database.
+        env:
+          DATABASE_URL: postgres://ci:ci@localhost:5432/ci
+        run: npm run build
+
+      - name: Boot with a bare environment and answer on /login
+        run: |
+          env -i PATH="$PATH" HOME="$HOME" DATABASE_URL=postgres://ci:ci@localhost:5432/ci npx next start --port 8097 > start.log 2>&1 &
+          for i in $(seq 1 30); do
+            sleep 1
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8097/login || true)
+            case "$code" in 2*|3*) echo "GET /login -> $code"; exit 0;; esac
+          done
+          echo "dashboard did not answer on /login"; cat start.log; exit 1
