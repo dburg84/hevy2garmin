@@ -4,6 +4,8 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 interface Props {
+  /** A GitHub token is saved (platform_credentials 'github'); the value itself is never sent to the browser. */
+  githubTokenSet?: boolean;
   autoSyncEnabled: boolean;
   autoSyncInterval: number;
   hrFusionEnabled: boolean;
@@ -67,6 +69,7 @@ function Toggle({ label, checked, onChange, hint }: { label: string; checked: bo
 export function SettingsForm(p: Props) {
   const router = useRouter();
   const [autoSync, setAutoSync] = useState(p.autoSyncEnabled);
+  const [githubPat, setGithubPat] = useState("");
   const [interval, setIntervalMin] = useState(p.autoSyncInterval);
   const [hrFusion, setHrFusion] = useState(p.hrFusionEnabled);
   const [strategy, setStrategy] = useState(p.mergeWatchStrategy);
@@ -133,6 +136,7 @@ export function SettingsForm(p: Props) {
           rest_between_exercises_seconds: numOrUndef(restEx) ?? 120,
         },
       };
+      if (githubPat.trim()) (body as Record<string, unknown>).github_pat = githubPat.trim();
       const res = await fetch("/api/settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -154,6 +158,12 @@ export function SettingsForm(p: Props) {
 
   return (
     <form onSubmit={submit} className="space-y-6">
+      <div className={cardCls}>
+        <label className={labelCls} htmlFor="github_pat">GitHub token (auto-sync on your fork)</label>
+        <input id="github_pat" type="password" autoComplete="off" value={githubPat} onChange={(e) => setGithubPat(e.target.value)}
+          placeholder={p.githubTokenSet ? "•••• saved — enter a new one to replace it" : "ghp_… (repo + workflow scope)"} className={controlCls} />
+        <p className="mt-0.5 text-xs text-text-muted">Stored in your database, same row the Python dashboard uses. Needed to enable auto-sync on Vercel.</p>
+      </div>
       {/* Sync */}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         <div className={cardCls}>
