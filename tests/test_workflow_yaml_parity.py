@@ -44,7 +44,8 @@ def test_flat_garmin_token_row_is_nested_on_schema_init():
     with db._get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT credentials FROM platform_credentials WHERE platform = 'garmin_tokens'")
-            creds = cur.fetchone()[0]
+            row = cur.fetchone()  # RealDictCursor: a dict, not a tuple
+            creds = row["credentials"] if isinstance(row, dict) else row[0]
             creds = json.loads(creds) if isinstance(creds, str) else creds
             cur.execute("DELETE FROM platform_credentials WHERE platform = 'garmin_tokens'")
         conn.commit()
