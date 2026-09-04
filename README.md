@@ -118,7 +118,7 @@ A Next.js rebuild of the dashboard lives in `web/`. It uses the same database an
 
 ```bash
 cd web
-cp .env.example .env.local   # fill in DATABASE_URL, H2G_PASSWORD, HEVY2GARMIN_SECRET, CRON_SECRET
+cp .env.example .env.local   # fill in DATABASE_URL, H2G_PASSWORD (or H2G_PASSWORD_HASH), HEVY2GARMIN_SECRET (or H2G_SECRET), CRON_SECRET
 npm ci && npm run dev        # http://localhost:8096
 ```
 
