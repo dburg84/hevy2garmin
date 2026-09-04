@@ -70,6 +70,22 @@ export function SettingsForm(p: Props) {
   const router = useRouter();
   const [autoSync, setAutoSync] = useState(p.autoSyncEnabled);
   const [githubPat, setGithubPat] = useState("");
+  const [pulling, setPulling] = useState(false);
+  const [pullMsg, setPullMsg] = useState<string | null>(null);
+  async function pullFromGarmin() {
+    setPulling(true); setPullMsg(null);
+    try {
+      const res = await fetch("/api/pull-garmin-profile", { method: "POST" });
+      const j = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; profile?: { weight_kg?: number | null; birth_year?: number | null; sex?: string | null; vo2max?: number | null } };
+      if (!res.ok || !j.ok || !j.profile) { setPullMsg(j.error ?? `Request failed (${res.status}).`); return; }
+      if (j.profile.weight_kg != null) setWeight(String(j.profile.weight_kg));
+      if (j.profile.birth_year != null) setBirthYear(String(j.profile.birth_year));
+      if (j.profile.sex) setSex(j.profile.sex);
+      if (j.profile.vo2max != null) setVo2max(String(j.profile.vo2max));
+      setPullMsg("Pulled from Garmin. Values updated below; save to keep them.");
+    } catch (err) { setPullMsg(err instanceof Error ? err.message : String(err)); }
+    finally { setPulling(false); }
+  }
   const [interval, setIntervalMin] = useState(p.autoSyncInterval);
   const [hrFusion, setHrFusion] = useState(p.hrFusionEnabled);
   const [strategy, setStrategy] = useState(p.mergeWatchStrategy);
@@ -202,6 +218,10 @@ export function SettingsForm(p: Props) {
           <div className={cardCls}>
             <label className={labelCls} htmlFor="sf-vo2max">VO₂max</label>
             <input id="sf-vo2max" type="number" min={1} max={99} step={0.1} value={vo2max} onChange={(e) => setVo2max(e.target.value)} placeholder="45" className={controlCls} />
+          </div>
+          <div className="col-span-full flex items-center gap-3">
+            <button type="button" onClick={pullFromGarmin} disabled={pulling} className="rounded-lg border border-border px-3 py-1.5 text-xs text-text disabled:opacity-50">{pulling ? "Pulling…" : "Pull from Garmin"}</button>
+            {pullMsg && <span className="text-xs text-text-muted">{pullMsg}</span>}
           </div>
         </div>
         <div className={`${cardCls} mt-4`}>
