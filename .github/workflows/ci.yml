@@ -117,6 +117,14 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Playwright smoke (desktop)
+        # A production build started with only a password: no database, every page must still render.
+        run: |
+          npx playwright install --with-deps chromium
+          npx playwright test --project=desktop
+        env:
+          CI: "1"
+
   check-fresh-fork:
     # What a forker's Vercel deploy actually installs: the base [project.dependencies]
     # only — no [dev]/[cloud] extras, no requirements.txt, non-editable (#357/#358 shape).
