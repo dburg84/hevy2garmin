@@ -1,23 +1,19 @@
 import { getDb } from "@/lib/db";
+import { loadGarminConnection, loadHevyConnection, type Connection } from "@/lib/connections";
 import { ConnectHevy } from "@/components/connect-hevy";
 import { ConnectGarmin } from "@/components/connect-garmin";
 
 // Queries the live hevy2garmin Postgres per request — never at build time.
 export const dynamic = "force-dynamic";
 
-interface Conn {
-  platform: string;
-  status: string;
-  connected_at: string | null;
-}
-
 interface SetupData {
   dbConfigured: boolean;
-  hevy: Conn | null;
-  garmin: Conn | null;
+  hevy: Connection;
+  garmin: Connection;
 }
 
-const EMPTY: SetupData = { dbConfigured: false, hevy: null, garmin: null };
+const NONE: Connection = { connected: false, connectedAt: null };
+const EMPTY: SetupData = { dbConfigured: false, hevy: NONE, garmin: NONE };
 
 async function loadSetup(): Promise<SetupData> {
   let sql: ReturnType<typeof getDb>;
@@ -26,18 +22,11 @@ async function loadSetup(): Promise<SetupData> {
   } catch {
     return EMPTY;
   }
-  const rows = await sql`
-    SELECT platform, status, connected_at
-    FROM platform_credentials
-    WHERE platform IN ('hevy', 'garmin')
-  `.catch(() => [] as Conn[]);
-  const find = (p: string): Conn | null =>
-    rows.find((r) => r.platform === p) ?? null;
-  return { dbConfigured: true, hevy: find("hevy"), garmin: find("garmin") };
-}
-
-function isConnected(c: Conn | null): boolean {
-  return Boolean(c && c.status !== "disconnected");
+  const [hevy, garmin] = await Promise.all([
+    loadHevyConnection(sql),
+    loadGarminConnection(sql),
+  ]);
+  return { dbConfigured: true, hevy, garmin };
 }
 
 function fmtDate(value: string | null): string {
@@ -63,8 +52,8 @@ function StatusDot({ connected }: { connected: boolean }) {
 
 export default async function SetupPage() {
   const data = await loadSetup();
-  const hevyConnected = isConnected(data.hevy);
-  const garminConnected = isConnected(data.garmin);
+  const hevyConnected = data.hevy.connected;
+  const garminConnected = data.garmin.connected;
 
   return (
     <main className="mx-auto max-w-3xl px-4 py-8 md:px-6">
@@ -87,9 +76,9 @@ export default async function SetupPage() {
           <h2 className="text-lg font-semibold text-text">Hevy</h2>
           <StatusDot connected={hevyConnected} />
         </div>
-        {hevyConnected && data.hevy?.connected_at && (
+        {hevyConnected && data.hevy.connectedAt && (
           <p className="mb-3 text-xs text-text-muted">
-            Connected {fmtDate(data.hevy.connected_at)}.
+            Connected {fmtDate(data.hevy.connectedAt)}.
           </p>
         )}
         <ConnectHevy connected={hevyConnected} />
@@ -101,9 +90,9 @@ export default async function SetupPage() {
           <h2 className="text-lg font-semibold text-text">Garmin Connect</h2>
           <StatusDot connected={garminConnected} />
         </div>
-        {garminConnected && data.garmin?.connected_at && (
+        {garminConnected && data.garmin.connectedAt && (
           <p className="mb-3 text-xs text-text-muted">
-            Connected {fmtDate(data.garmin.connected_at)}.
+            Connected {fmtDate(data.garmin.connectedAt)}.
           </p>
         )}
         <ConnectGarmin connected={garminConnected} />
