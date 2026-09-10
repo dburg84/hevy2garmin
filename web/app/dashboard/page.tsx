@@ -1,4 +1,5 @@
 import { getDb } from "@/lib/db";
+import { loadGarminConnection, loadHevyConnection } from "@/lib/connections";
 import { SyncPanel } from "@/components/sync-panel";
 import { SyncLoop } from "@/components/sync-loop";
 import { BatchSync } from "@/components/batch-sync";
@@ -72,12 +73,9 @@ async function loadDashboard(): Promise<DashboardData> {
 
   // Every query is guarded so a missing/empty table degrades to a sane default
   // rather than crashing the whole page render.
-  const [connected, counts, recent, syncLog, autoSync, pendingRow, routinesRow] = await Promise.all([
-    sql`
-      SELECT platform, status
-      FROM platform_credentials
-      WHERE platform IN ('hevy', 'garmin')
-    `.catch(() => [] as Array<{ platform: string; status: string }>),
+  const [hevyConn, garminConn, counts, recent, syncLog, autoSync, pendingRow, routinesRow] = await Promise.all([
+    loadHevyConnection(sql),
+    loadGarminConnection(sql),
     sql`
       SELECT
         count(*) FILTER (WHERE COALESCE(status, 'success') = 'success')::int AS total,
@@ -123,14 +121,11 @@ async function loadDashboard(): Promise<DashboardData> {
 
   return {
     dbConfigured: true,
-    // A saved credential row is "connected" unless explicitly disconnected.
-    // The DB uses status='active' for a live connection (not 'connected').
-    hevyConnected:
-      connected.some((r) => r.platform === "hevy" && r.status !== "disconnected") ||
-      recent.length > 0,
+    // See lib/connections.ts for which row means what. The `recent` fallbacks keep a user who
+    // synced under an older build showing as connected even if their credential row is odd.
+    hevyConnected: hevyConn.connected || recent.length > 0,
     garminConnected:
-      connected.some((r) => r.platform === "garmin" && r.status !== "disconnected") ||
-      recent.some((r) => r.garmin_activity_id != null),
+      garminConn.connected || recent.some((r) => r.garmin_activity_id != null),
     totalSynced: counts[0]?.total ?? 0,
     syncedThisWeek: counts[0]?.week ?? 0,
     markedSynced: counts[0]?.marked ?? 0,

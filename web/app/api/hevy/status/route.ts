@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
+import { loadGarminConnection, loadHevyConnection } from "@/lib/connections";
 
 // Reads the live hevy2garmin Postgres at request time — never at build.
 export const dynamic = "force-dynamic";
@@ -45,20 +46,16 @@ export async function GET() {
     return NextResponse.json(EMPTY);
   }
 
-  // Connection status from platform_credentials. `.catch` guards a missing table
-  // (fresh deploy that hasn't run the Python schema bootstrap yet).
-  const connected = await sql`
-    SELECT platform, status
-    FROM platform_credentials
-    WHERE platform IN ('hevy', 'garmin')
-  `.catch(() => [] as Array<{ platform: string; status: string }>);
-
-  const hevyConnected = connected.some(
-    (r) => r.platform === "hevy" && r.status === "connected",
-  );
-  const garminConnected = connected.some(
-    (r) => r.platform === "garmin" && r.status === "connected",
-  );
+  // Connection status from platform_credentials. See lib/connections.ts for which row means
+  // what; both helpers guard a missing table (fresh deploy that hasn't bootstrapped the schema).
+  // This used to test status === 'connected', a value nothing writes, so both flags were always
+  // false, and it read Garmin off the 'garmin' row a web login never creates (#495).
+  const [hevyConn, garminConn] = await Promise.all([
+    loadHevyConnection(sql),
+    loadGarminConnection(sql),
+  ]);
+  const hevyConnected = hevyConn.connected;
+  const garminConnected = garminConn.connected;
 
   // Aggregate counts over synced_workouts (success terminal state only).
   const counts = await sql`
