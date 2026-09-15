@@ -6,7 +6,37 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-09-11
+
+### Removed
+
+- The Python dashboard: the FastAPI server, its templates and static files, the `serve` command, the Vercel Python entry (`api/index.py`, `vercel.json`) and `docker-compose.yml`. The dashboard is the Next.js app in `web/`, the deploy for every fork (Root Directory `web` on Vercel). Announced in 0.11.0 (#514).
+- `fastapi`, `uvicorn`, `jinja2` and `python-multipart` from the dependencies. The package is the CLI: `hevy2garmin init`, `sync`, `status`, `map` and the rest are unchanged.
+
+### Notes
+
+- The PyPI package is deprecated with an end date of 2026-10-31 (#515). The maintained code is the TypeScript package and `web/`.
+
+## [0.6.0 (npm)] - 2026-09-11
+
+- `generateFit` accepts `trainingLoad`. When set, the FIT session carries `training_load_peak`, which Garmin Connect displays as the activity's Training Load for uploads (hevy2garmin#522 proved the field is honoured; #523). Off by default: a written load feeds Garmin's acute load and training status.
+
+## [0.11.0] - 2026-09-11
+
+### Deprecated
+- **The Python dashboard is retired in 0.12.0.** The Next.js dashboard in `web/` is the deploy for every fork: set **Root Directory** to `web` on your Vercel project (Settings > General) before updating past 0.11.x. In 0.12.0 `api/index.py`, `server.py`, the templates and the root `vercel.json` routing are removed, so a project with an empty Root Directory stops deploying. The demo at `hevy2garmin-demo.gkos.dev` already runs the Next.js dashboard; the Python one stays at `hevy2garmin-demo.vercel.app` until 0.12.0.
+- **The PyPI package is deprecated, with an end date of 2026-10-31.** The CLI and the Python sync core keep working until then; after that date the package receives no releases and is marked deprecated on PyPI. The replacements are the Next.js dashboard for the app and the npm package `hevy2garmin` for the sync engine (same FIT generation, same exercise map, same dedup rules, Python-parity goldens in its tests). `garmin-auth` on PyPI follows the same date.
+
 ### Changed
+- The Garmin login Worker moved to garmin-auth (`garmin-auth-sso.gkos.workers.dev`); the dashboard binds `garmin-auth/sso-worker` and the Python setup page points at the new URL. `worker/` and `worker-di/` are gone from this repository; a fork with its own Worker keeps setting `GARMIN_LOGIN_WORKER_URL` (drkostas/soma#842).
+
+### Changed
+- `hevy2garmin` 0.5.0 adds the exercise to muscle-group mapping and volume aggregation (`getExerciseMuscles`, `aggregateMuscleVolumes`, `MUSCLE_LABELS`, `MUSCLE_HEX`) that soma's web and app each kept a copy of (soma#841).
+- `hevy2garmin` 0.4.1 is 0.4.0 rebuilt from an empty `dist/`: 0.4.0 shipped stale compiled files that shadowed the sync engine's types. A `prepack` step now clears and rebuilds `dist/` before every publish ([#508](https://github.com/drkostas/hevy2garmin/issues/508)).
+- `hevy2garmin` 0.4.0 adds `matchHevyToGarmin` and `toUtcDate`, the timestamp matcher soma used to keep as a local copy (soma#835).
+- The `hevy2garmin-web` Vercel project is now connected to this repository with Root Directory `web`, so every pull request builds a preview of the Next.js dashboard next to the Python one, and merges to `main` deploy it ([#478](https://github.com/drkostas/hevy2garmin/issues/478)). Until now the green Vercel check on a PR had only ever built the Python dashboard.
+- Coming next: `hevy2garmin-demo.gkos.dev` moves to the Next.js dashboard. The Python demo stays reachable for one more release at `hevy2garmin-demo.vercel.app` ([#456](https://github.com/drkostas/hevy2garmin/issues/456)).
+- The sync engine now lives in the `hevy2garmin` npm package (0.3.0): `syncOneWorkout`, `listCandidates`, `reconcilePending`, `retryPending`, the pure dedup helpers and `generateDescription`, behind a `SyncStore` interface and a `GarminGateway`. The web dashboard imports it and keeps only a Postgres `SyncStore` adapter and route glue, so soma and any other consumer run the same dedup and dry-run logic ([#500](https://github.com/drkostas/hevy2garmin/issues/500)).
 - The Next.js web dashboard in `web/` is now the recommended Vercel deploy: set **Root Directory** to `web` when importing a fork, or change it in an existing project's settings and redeploy ([#456](https://github.com/drkostas/hevy2garmin/issues/456)). The Python dashboard keeps working for existing deployments (Root Directory empty) but no longer gets new features. Both read the same database and credential rows.
 
 ### Added

@@ -63,13 +63,26 @@ export async function uploadFit(
   return { uploadId, activityId };
 }
 
-/** Find an activity by its start time (matches the uploaded FIT). */
-export async function findActivityByStartTime(client: GarminClient, targetStart: string): Promise<number | null> {
+/**
+ * Find an activity by its start time (matches the uploaded FIT).
+ *
+ * `excludeActivityIds` exists for the replace strategy: the watch activity
+ * being replaced sits at the same start time as the workout, so without the
+ * exclusion this would report the very activity we are about to delete and the
+ * upload would be skipped.
+ */
+export async function findActivityByStartTime(
+  client: GarminClient,
+  targetStart: string,
+  excludeActivityIds?: Array<number | string> | null,
+): Promise<number | null> {
   const acts = await client.connectapi<Array<{ activityId: number; startTimeGMT?: string; startTimeLocal?: string }>>(
     "/activitylist-service/activities/search/activities?limit=10",
   );
+  const excluded = new Set((excludeActivityIds ?? []).map((id) => String(id)));
   const target = new Date(targetStart.replace(" ", "T")).getTime();
   for (const a of acts) {
+    if (excluded.has(String(a.activityId))) continue;
     const t = a.startTimeGMT ?? a.startTimeLocal;
     if (t && Math.abs(new Date(t.replace(" ", "T") + (t.includes("Z") ? "" : "Z")).getTime() - target) < 5 * 60 * 1000) {
       return a.activityId;
@@ -97,6 +110,91 @@ export async function deleteActivity(client: GarminClient, activityId: number): 
   if (![200, 204].includes(res.status)) throw new Error(`delete activity ${activityId} → ${res.status}`);
 }
 
+/**
+ * The original file Garmin holds for an activity, which for a watch recording
+ * is the device FIT and the only place its per-second heart rate exists.
+ *
+ * The response is normally a zip holding one .fit; `extractHrFromFit` handles
+ * both that and a bare FIT. Returns null rather than throwing, because a failed
+ * download must not break a sync: the caller falls back to another HR source,
+ * and the one case where the HR is not optional is enforced by `hrForSync`.
+ */
+export async function downloadActivityFit(
+  client: GarminClient,
+  activityId: number | string,
+): Promise<Uint8Array | null> {
+  const url = `https://connectapi.${client.domain}/download-service/files/activity/${activityId}`;
+  const req = () => fetch(url, { headers: nativeHeaders(client.di_token!, { NK: "NT" }) });
+  try {
+    let res = await req();
+    if (res.status === 401) { await client.refreshDiToken(); res = await req(); }
+    if (!res.ok) return null;
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    return bytes.length ? bytes : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The Garmin display name, which the wellness endpoints are keyed by.
+ *
+ * Cached per client: it does not change, and a sync would otherwise fetch the
+ * same profile on every workout.
+ */
+const displayNames = new WeakMap<GarminClient, string | null>();
+
+export async function getDisplayName(client: GarminClient): Promise<string | null> {
+  if (displayNames.has(client)) return displayNames.get(client) ?? null;
+  let name: string | null = null;
+  try {
+    const profile = await client.connectapi<{ displayName?: string }>(
+      "/userprofile-service/userprofile/profile",
+    );
+    name = profile?.displayName ?? null;
+  } catch {
+    name = null; // best effort: the caller falls back to another HR source
+  }
+  displayNames.set(client, name);
+  return name;
+}
+
+/** One reading from Garmin's daily monitoring feed: [epoch ms, bpm]. */
+export type DailyHeartRateValue = [number, number | null];
+
+/**
+ * Garmin's daily wrist heart rate for a date, as `[epoch_ms, bpm]` pairs.
+ *
+ * This is the coarsest HR source, roughly a reading every couple of minutes,
+ * and the last resort. It is also the only one that covers a workout the watch
+ * never recorded as an activity: the user wore the watch, so the heart rate
+ * exists, it is just not attached to anything.
+ *
+ * Returns an empty list on any failure. HR is an enrichment and must never
+ * break a sync.
+ */
+export async function getDailyHeartRate(
+  client: GarminClient,
+  date: string,
+): Promise<DailyHeartRateValue[]> {
+  const day = String(date).slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return [];
+  const who = await getDisplayName(client);
+  if (!who) return [];
+  try {
+    const data = await client.connectapi<{ heartRateValues?: unknown }>(
+      `/wellness-service/wellness/dailyHeartRate/${encodeURIComponent(who)}?date=${day}`,
+    );
+    const values = data?.heartRateValues;
+    if (!Array.isArray(values)) return [];
+    return values.filter(
+      (v): v is DailyHeartRateValue => Array.isArray(v) && v.length >= 2 && typeof v[0] === "number",
+    );
+  } catch {
+    return [];
+  }
+}
+
 async function postJson(client: GarminClient, path: string, body: unknown): Promise<void> {
   const url = `https://connectapi.${client.domain}${path}`;
   const req = () => fetch(url, {
@@ -107,4 +205,68 @@ async function postJson(client: GarminClient, path: string, body: unknown): Prom
   let res = await req();
   if (res.status === 401) { await client.refreshDiToken(); res = await req(); }
   if (!res.ok) throw new Error(`POST ${path} → ${res.status}`);
+}
+
+/**
+ * Activities Garmin holds in a date range, used to find the watch recording a
+ * Hevy workout belongs to. Dates are YYYY-MM-DD.
+ */
+export async function getActivitiesByDate(
+  client: GarminClient,
+  startDate: string,
+  endDate: string,
+  limit = 50,
+): Promise<Array<Record<string, unknown>>> {
+  const q = `startDate=${startDate}&endDate=${endDate}&limit=${limit}&start=0`;
+  return client.connectapi<Array<Record<string, unknown>>>(
+    `/activitylist-service/activities/search/activities?${q}`,
+  );
+}
+
+/** An activity's current exercise sets, taken as a backup before a merge. */
+export async function getActivityExerciseSets(
+  client: GarminClient,
+  activityId: number,
+): Promise<Record<string, unknown>> {
+  await sleep(1);
+  return client.connectapi<Record<string, unknown>>(
+    `/activity-service/activity/${activityId}/exerciseSets`,
+  );
+}
+
+/**
+ * PUT exercise sets onto an existing activity, replacing ALL of them.
+ *
+ * Atomic: Garmin accepts or rejects the whole payload and names no offending
+ * exercise, which is why callers go through pushWithNameFallback rather than
+ * calling this directly.
+ *
+ * The failure text is carried into the thrown Error on purpose. The retry
+ * decides what to do by reading it, so swallowing it would turn a recoverable
+ * rejection into a total loss of the user's sets.
+ */
+export async function pushExerciseSets(
+  client: GarminClient,
+  activityId: number,
+  payload: unknown,
+): Promise<void> {
+  const path = `/activity-service/activity/${activityId}/exerciseSets`;
+  const url = `https://connectapi.${client.domain}${path}`;
+  await sleep(1); // manual rate limit, matching the Python
+  const req = () => fetch(url, {
+    method: "POST",
+    headers: nativeHeaders(client.di_token!, {
+      "Content-Type": "application/json",
+      "X-HTTP-Method-Override": "PUT",
+      NK: "NT",
+    }),
+    body: JSON.stringify(payload),
+  });
+  let res = await req();
+  if (res.status === 401) { await client.refreshDiToken(); res = await req(); }
+  // 204 No Content is the success shape here.
+  if (!res.ok && res.status !== 204) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`PUT exerciseSets ${activityId} → ${res.status}: ${text.slice(0, 200)}`);
+  }
 }
