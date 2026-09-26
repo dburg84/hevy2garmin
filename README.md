@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="src/hevy2garmin/static/favicon.svg" width="80" height="80" alt="hevy2garmin logo">
+  <img src="docs/logo.svg" width="80" height="80" alt="hevy2garmin logo">
 </p>
 
 <h1 align="center">hevy2garmin</h1>
@@ -42,11 +42,14 @@ Hevy is great for tracking gym workouts but doesn't sync to Garmin. This tool br
 
 ## Screenshots
 
-| Workouts | Mappings |
+| Workouts | Routines |
 |----------|----------|
-| ![Workouts](docs/screenshots/workouts.png) | ![Mappings](docs/screenshots/mappings.png) |
-| **HR Timeline** | **Calorie Breakdown** |
-| ![HR Chart](docs/screenshots/hr-chart.png) | ![Calories](docs/screenshots/calories.png) |
+| ![Workouts](docs/screenshots/workouts.png) | ![Routines](docs/screenshots/routines.png) |
+| **Heart rate timeline** | **Exercise mappings** |
+| ![Heart rate timeline](docs/screenshots/hr-chart.png) | ![Exercise mappings](docs/screenshots/mappings.png) |
+
+These are from the [live demo](https://hevy2garmin-demo.gkos.dev), so they show the
+current dashboard with sample data.
 
 ## Requirements
 
@@ -453,6 +456,15 @@ The tool reads from **Hevy** and writes to **Garmin Connect** — it's not tied 
 a specific watch. The destination is always Garmin Connect, so you need a Garmin
 account; the watch brand you wear at the gym doesn't matter. It runs in the
 browser/cloud, not on the watch.
+
+**Every workout appears twice on Strava.**
+This happens when both Hevy and Garmin are connected to Strava. Hevy sends the
+workout to Strava itself, hevy2garmin sends the same workout to Garmin, and
+Garmin forwards it to Strava as well, so Strava receives it from two directions.
+Turn off one of the two connections. Turning off Hevy to Strava is the usual
+choice, because the copy that arrives through Garmin carries the heart rate and
+the exercise names; turning off Garmin to Strava works too if you prefer Hevy's
+own upload. Nothing needs changing in hevy2garmin either way.
 
 **My activity shows the wrong time on Strava.**
 The FIT file and Garmin Connect have the correct time. The problem is the handoff

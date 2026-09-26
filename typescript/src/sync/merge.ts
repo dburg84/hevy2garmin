@@ -45,6 +45,12 @@ export function isWatchRecorded(activity: Pick<CandidateActivity, "manufacturer"
 }
 
 export interface MergeOptions extends MergeMatchOptions {
+  /**
+   * How long to wait before reading the sets back to check Garmin kept the
+   * exercise names. Injectable so tests do not sleep; production uses
+   * `DEFAULT_VERIFY_DELAY_MS`.
+   */
+  verifyDelayMs?: number;
   strategy?: WatchStrategy;
   /** User overrides for exercises the built-in table does not cover. */
   customMappings?: Record<string, [number, number]>;
@@ -64,8 +70,60 @@ export interface MergeOutcome {
   reason?: string;
   /** True when the caller should upload its own activity and delete this one. */
   replaceWatchActivity?: boolean;
+  /**
+   * True when the merge was undone and the caller must upload a fresh named
+   * activity, skipping the start-time lookup. Set when Garmin accepted the sets
+   * and silently dropped their names, which leaves the matched activity worse
+   * than before, so it is restored and the workout gets a real upload instead.
+   */
+  forceFreshUpload?: boolean;
   /** How many ACTIVE sets were pushed, for the sync log and for tests. */
   setsPushed?: number;
+}
+
+/** How long to let Garmin process a PUT before reading the sets back. */
+export const DEFAULT_VERIFY_DELAY_MS = 4000;
+
+const sleep = (ms: number) => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve());
+
+/**
+ * Did Garmin actually keep the exercise identities after the PUT?
+ *
+ * Garmin accepts the sets and can silently drop the category, leaving every set
+ * as "Choose an Exercise" (#159, confirmed live). Ported from `_names_applied`
+ * in `merge.py:53-75`, including two rules that look contradictory and are not.
+ *
+ * A successful read with no ACTIVE categories at all returns FALSE: that is
+ * evidence the names are gone. A read that THROWS returns TRUE: an exception
+ * says nothing about what Garmin kept, and failing closed there would discard a
+ * merge that probably worked because of a transient error.
+ *
+ * "Applied" is any surviving real category, not all of them. A partial drop
+ * still leaves a usable activity, and discarding it would cost the user the
+ * sets that did land.
+ */
+async function namesApplied(
+  gateway: GarminGateway,
+  activityId: number,
+  delayMs: number,
+): Promise<boolean> {
+  await sleep(delayMs);
+  let after: Record<string, unknown>;
+  try {
+    after = await gateway.exerciseSets(activityId);
+  } catch {
+    return true;
+  }
+  const sets = (after?.exerciseSets as Array<Record<string, unknown>> | undefined) ?? [];
+  const cats: unknown[] = [];
+  for (const s of sets) {
+    if (s?.setType !== "ACTIVE") continue;
+    for (const e of (s.exercises as Array<Record<string, unknown>> | undefined) ?? []) {
+      cats.push(e?.category);
+    }
+  }
+  if (!cats.length) return false;
+  return cats.some((c) => c && c !== "UNKNOWN");
 }
 
 /**
@@ -80,12 +138,55 @@ export interface MergeOutcome {
  * caller, which already owns uploading and is the only place that knows whether
  * this is a dry run.
  */
+/** Consecutive `exerciseSets` PUT failures before merge stops trying. */
+export const MERGE_MAX_CONSECUTIVE_FAILURES = 3;
+
+/**
+ * The durable state a merge needs, kept deliberately narrow.
+ *
+ * Not a general key-value door onto `app_cache`. The store interface exists so
+ * the engine cannot reach past it, and a general getter would hand every future
+ * caller the ability to write anywhere.
+ *
+ * Every method is optional so a consumer without durable storage still works,
+ * with the guards degrading to what they were before rather than throwing.
+ */
+export interface MergeStore {
+  /** The pre-merge sets, readable on a later run and from another process. */
+  loadMergeBackup?(activityId: number): Promise<Record<string, unknown> | null>;
+  saveMergeBackup?(activityId: number, sets: Record<string, unknown>): Promise<void>;
+  clearMergeBackup?(activityId: number): Promise<void>;
+  /** Consecutive PUT failures, for the circuit breaker. */
+  loadMergeFailures?(): Promise<number>;
+  saveMergeFailures?(count: number): Promise<void>;
+}
+
+export interface MergeDeps {
+  store?: MergeStore;
+}
+
 export async function mergeIntoWatchActivity(
   gateway: GarminGateway,
   workout: TimedWorkout & { exercises?: unknown[] },
   options: MergeOptions = {},
+  deps: MergeDeps = {},
 ): Promise<MergeOutcome> {
   const strategy = options.strategy ?? DEFAULT_WATCH_STRATEGY;
+  const store = deps.store;
+
+  // Checked before anything else, including the activity listing, because the
+  // listing is itself a rate-limited Garmin call and repeating it for every
+  // workout is half of what this guard is for. Python reads it in the same
+  // place (`merge.py:419-422`).
+  if (store?.loadMergeFailures) {
+    const failures = await store.loadMergeFailures().catch(() => 0);
+    if (failures >= MERGE_MAX_CONSECUTIVE_FAILURES) {
+      return {
+        merged: false,
+        reason: `circuit breaker: ${failures} consecutive exerciseSets failures, merge disabled for now`,
+      };
+    }
+  }
 
   const range = mergeSearchRange(workout);
   if (!range) return { merged: false, reason: "workout has no usable start or end time" };
@@ -103,9 +204,12 @@ export async function mergeIntoWatchActivity(
   if (!match) return { merged: false, reason: "no matching Garmin activity found" };
 
   const act = match.activity;
-  if (!isWatchRecorded(act)) {
-    return { merged: false, reason: "matched activity is our own upload, not a watch recording" };
-  }
+  // Our own uploads are merged into as well. Refusing them meant a user who
+  // edited a workout in Hevy and re-synced got the title and description
+  // updated and the sets left as they were, because the fall-through does
+  // rename and describe only. Python merges here too (`merge.py:450-451`), and
+  // the read-back further down is the safeguard that comes with it (#597).
+  const isWatch = isWatchRecorded(act);
   if (!IN_PLACE.has(strategy)) {
     return { merged: false, activityId: act.activityId, strategy, replaceWatchActivity: true };
   }
@@ -141,6 +245,15 @@ export async function mergeIntoWatchActivity(
     backup = null; // best effort; the merge does not depend on it
   }
 
+  // Durably, before the PUT. A backup that lives only in this closure covers a
+  // throw from the push and nothing else, and the case that matters is the
+  // process dying between the PUT landing and the restore, which on a
+  // serverless request is an ordinary timeout. Same key shape as Python's
+  // `merge_backup_<id>` so either stack can read the other's (#598).
+  if (backup && store?.saveMergeBackup) {
+    await store.saveMergeBackup(act.activityId, backup).catch(() => {});
+  }
+
   try {
     await pushWithNameFallback((p) => gateway.putExerciseSets(act.activityId, p), payload);
   } catch (e) {
@@ -149,7 +262,16 @@ export async function mergeIntoWatchActivity(
         await gateway.putExerciseSets(act.activityId, backup);
       } catch {
         // Restoring is best effort too; the original error is the one to report.
+        // The durable copy is deliberately LEFT in place here so a later run
+        // can still put the original sets back.
       }
+    }
+    // Only a PUT failure counts toward the breaker. A workout with no matching
+    // activity is an ordinary outcome, and counting it would disable merge for
+    // everyone whose watch simply was not recording.
+    if (store?.saveMergeFailures) {
+      const failures = store.loadMergeFailures ? await store.loadMergeFailures().catch(() => 0) : 0;
+      await store.saveMergeFailures(failures + 1).catch(() => {});
     }
     return {
       merged: false,
@@ -158,6 +280,44 @@ export async function mergeIntoWatchActivity(
       reason: `exerciseSets push failed: ${(e as Error).message}`,
     };
   }
+
+  // Verify, except for a watch activity under `merge`. There we keep the watch
+  // recording knowing Garmin will not display our names on it, so verifying
+  // would restore and throw away a merge we meant to keep. On our own upload
+  // the activity exists only to carry these sets, so a silent drop has to be
+  // caught (`merge.py:545-556`).
+  if (!(isWatch && strategy === "merge")) {
+    const applied = await namesApplied(
+      gateway,
+      act.activityId,
+      options.verifyDelayMs ?? DEFAULT_VERIFY_DELAY_MS,
+    );
+    if (!applied) {
+      // Prefer the durable copy, so a restore behaves the same whether it
+      // happens inline or on a later run.
+      const original = (store?.loadMergeBackup ? await store.loadMergeBackup(act.activityId).catch(() => null) : null) ?? backup;
+      if (original && Array.isArray((original as { exerciseSets?: unknown }).exerciseSets)) {
+        try {
+          await gateway.putExerciseSets(act.activityId, original);
+        } catch {
+          // Best effort. The outcome below is the one that matters.
+        }
+      }
+      if (store?.clearMergeBackup) await store.clearMergeBackup(act.activityId).catch(() => {});
+      return {
+        merged: false,
+        activityId: act.activityId,
+        strategy,
+        forceFreshUpload: true,
+        reason: "Garmin dropped the exercise names; restored and uploading a named activity instead",
+      };
+    }
+  }
+
+  // The merge landed. Drop the backup, because a stale one is worse than none:
+  // a later restore would put back sets from a merge that has been superseded.
+  if (store?.clearMergeBackup) await store.clearMergeBackup(act.activityId).catch(() => {});
+  if (store?.saveMergeFailures) await store.saveMergeFailures(0).catch(() => {});
 
   return {
     merged: true,

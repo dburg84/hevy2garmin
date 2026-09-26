@@ -19,6 +19,31 @@ import {
  * Garmin upload, Start is behind an inline confirmation and the server also
  * requires authorization for ?live=1.
  */
+/**
+ * Append this pass to the dashboard's Sync log.
+ *
+ * Best-effort on purpose: the sync itself already happened, and failing to
+ * write a log row must not be reported to the user as a failed sync. The loop
+ * has no `failed` counter of its own, because it stops on the first error
+ * rather than counting them, so an error ends the run with whatever it had
+ * plus one failure.
+ */
+async function recordRun(state: LoopState): Promise<void> {
+  try {
+    await fetch("/api/sync-run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        synced: state.synced,
+        skipped: state.skipped,
+        failed: state.errorKind ? 1 : 0,
+      }),
+    });
+  } catch {
+    // The log is diagnostic. Losing a row is the lesser loss.
+  }
+}
+
 export function SyncLoop({ ready }: { ready: boolean }) {
   const router = useRouter();
   const [state, setState] = useState<LoopState>(initialLoopState);
@@ -43,7 +68,9 @@ export function SyncLoop({ ready }: { ready: boolean }) {
         let httpStatus = 0;
         let result: SyncOneLike = {};
         try {
-          const res = await fetch("/api/sync-one?live=1", {
+          // batch=1: this loop posts ONE aggregate row to /api/sync-run when it
+          // finishes, so the route must not also write a row per workout.
+          const res = await fetch("/api/sync-one?live=1&batch=1", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ live: 1 }),
@@ -62,6 +89,13 @@ export function SyncLoop({ ready }: { ready: boolean }) {
       }
     } finally {
       setRunning(false);
+      // Record the whole pass as ONE row in the Sync log. The dashboard's own
+      // buttons drive /api/sync-one per workout, and nothing on that path ever
+      // wrote the log, so the panel said "No sync runs recorded yet" while
+      // workouts were plainly syncing (#611). A row per workout would fill the
+      // panel with dozens of one-line entries instead, so the totals go once,
+      // here, where the run actually ends.
+      await recordRun(cur);
       if (cur.synced > 0) router.refresh();
     }
   }

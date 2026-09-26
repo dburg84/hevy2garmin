@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { syncOneWorkout } from "@/lib/sync-one";
 import { getDb } from "@/lib/db";
+import { recordSyncRun } from "hevy2garmin";
+import { postgresSyncStore } from "@/lib/sync-store";
+import { tallyForLog } from "@/lib/sync-tally";
 import { verifySession, SESSION_COOKIE, authEnabled } from "@/lib/auth";
 
 // Reads live Hevy + Postgres (and, on the live path, Garmin) at request time.
@@ -76,6 +79,17 @@ export async function POST(
 
   try {
     const result = await syncOneWorkout(sql, { dryRun, targetHevyId: hevyId });
+    if (!dryRun) {
+      // Same reason as /api/sync-one: the Workouts page's per-workout button is
+      // a manual sync and has to leave a trace. Recorded here rather than in
+      // candidates-list.tsx, because a component can forget and a route cannot.
+      try {
+        const tally = tallyForLog((result as { status?: unknown }).status);
+        if (tally) await recordSyncRun(postgresSyncStore(sql), tally, "manual (one)");
+      } catch (logErr) {
+        console.error("sync_log write failed:", logErr);
+      }
+    }
     return NextResponse.json(result);
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);

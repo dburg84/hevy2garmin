@@ -28,7 +28,9 @@
  * the Hevy fetch. The engine itself is pure orchestration.
  */
 import { generateFit, type FitResult, type HevyWorkout as FitWorkout } from "../fit";
+import { GarminUploadRejected } from "../garmin";
 import { dailyHrToPoints, HRBackupError, hrForSync, type HrPoint } from "../hr";
+import { toUtcDate } from "../match";
 import { filterUnsynced } from "./dedup";
 import { generateDescription } from "./description";
 import { checkGracePeriod, DEFAULT_GRACE_MINUTES } from "./grace";
@@ -250,11 +252,17 @@ export async function syncOneWorkout(deps: SyncDeps, options: SyncOneOptions = {
   let forceFreshUpload = false;
 
   if (!dryRun && merge.enabled) {
-    const outcome = await mergeIntoWatchActivity(gateway, workout, mergeOptions);
+    const outcome = await mergeIntoWatchActivity(gateway, workout, mergeOptions, { store });
     if (outcome.merged && outcome.activityId != null) {
       return finishMerge(outcome.activityId, outcome.setsPushed ?? 0);
     }
     mergeFallbackReason = outcome.reason ?? null;
+    // The merge was undone because Garmin dropped the exercise names. The
+    // start-time lookup would match the very activity we just restored and skip
+    // the upload, so it is bypassed and the workout gets a real named one.
+    if (outcome.forceFreshUpload) {
+      forceFreshUpload = true;
+    }
     // `replace`: the watch activity is ours to delete, but only after the named
     // upload lands AND its heart rate is secured.
     if (outcome.replaceWatchActivity && outcome.activityId != null) {
@@ -275,10 +283,19 @@ export async function syncOneWorkout(deps: SyncDeps, options: SyncOneOptions = {
       // HR before the activity can be deleted. Switching the toggle off must
       // not become permission to destroy the only recording, so the protection
       // always runs and only the embedding is gated, as in `sync.py`.
-      const found = await hrForSync(workout, hrDeps(deps, gateway), {
-        enabled: true,
-        sourceActivityId: watchActivityId,
-      });
+      const hrOptions = { enabled: true, sourceActivityId: watchActivityId };
+      let found = await hrForSync(workout, hrDeps(deps, gateway), hrOptions);
+
+      // Ask a second time when the first found nothing. Garmin's daily
+      // monitoring feed lags, so a workout that finished recently often has no
+      // readings for its window on the first ask and does on the second. The
+      // grace period makes this MORE likely rather than less, because an
+      // unattended run reaches the workout not long after its window opens.
+      // Python does the same at `sync.py:545-557`.
+      if (!found || !found.length) {
+        found = await hrForSync(workout, hrDeps(deps, gateway), hrOptions);
+      }
+
       hrSamples = hrFusion ? found : null;
     } catch (err) {
       if (!(err instanceof HRBackupError)) throw err;
@@ -287,10 +304,12 @@ export async function syncOneWorkout(deps: SyncDeps, options: SyncOneOptions = {
       // sets still land, and only the exercise names are lost. Matches the
       // Python fallback, which exists because aborting the sync here was a
       // regression users felt (#244).
-      const inPlace = await mergeIntoWatchActivity(gateway, workout, {
-        ...mergeOptions,
-        strategy: "merge",
-      });
+      const inPlace = await mergeIntoWatchActivity(
+        gateway,
+        workout,
+        { ...mergeOptions, strategy: "merge" },
+        { store },
+      );
       if (inPlace.merged && inPlace.activityId != null) {
         return finishMerge(inPlace.activityId, inPlace.setsPushed ?? 0, err.message);
       }
@@ -402,18 +421,103 @@ export async function syncOneWorkout(deps: SyncDeps, options: SyncOneOptions = {
     };
   }
 
+  // Snapshot the activities around this workout BEFORE uploading. It is what
+  // lets a later reconcile tell our upload apart from something that was
+  // already there, and without it reconcile can adopt the user's own watch
+  // recording and record it as ours. Python does the same at `sync.py:616-624`
+  // and, like Python, a snapshot that throws drops the claim and re-raises
+  // rather than uploading blind.
+  let snapshotIds: string[] = [];
+  try {
+    const start = String(workout.start_time ?? workout.startTime ?? "");
+    const end = String(workout.end_time ?? workout.endTime ?? "") || start;
+    const from = toUtcDate(start);
+    const to = toUtcDate(end) ?? from;
+    if (from && to) {
+      const day = (d: Date, off: number) =>
+        new Date(d.getTime() + off * 86_400_000).toISOString().slice(0, 10);
+      const snapshot = await gateway.activitiesByDate(day(from, -1), day(to, 1));
+      snapshotIds = snapshot
+        .map((a) => (a as { activityId?: number | string }).activityId)
+        .filter((id): id is number | string => id != null)
+        .map(String);
+    }
+  } catch (err) {
+    await store.deletePending(wid).catch(() => {});
+    throw err;
+  }
+
   try {
     await store.updatePending(wid, {
       phase: "processing",
       attempt_count: 1,
+      pre_upload_ids: snapshotIds,
       watch_activity_id: watchActivityId != null ? String(watchActivityId) : null,
     });
 
-    const uploadResult = await gateway.upload(fitResult.fit, startTime);
-    const activityId = uploadResult.activityId;
+    // Exclude the watch copy while resolving the new activity. It shares this
+    // workout's start time, so the lookup would otherwise hand back the id we
+    // are about to delete and the rename, describe and delete would all land on
+    // a dead activity (#596).
+    const uploadResult = await gateway.upload(
+      fitResult.fit,
+      startTime,
+      watchActivityId != null ? [watchActivityId] : null,
+    );
+
+    // Record which import this was, so a reconcile can ask Garmin about this
+    // exact upload instead of guessing from start times.
+    if (uploadResult.uploadId != null) {
+      await store
+        .updatePending(wid, { upload_id: String(uploadResult.uploadId), last_error: null })
+        .catch(() => {});
+    }
+
+    // Do not trust an id that was already there. Garmin can answer with a
+    // pre-existing activity, and adopting one would mark the workout synced
+    // against something we did not create. Checked against the snapshot and the
+    // watch copy, as `sync.py:648-651` does.
+    const returned = uploadResult.activityId;
+    const activityId =
+      returned != null &&
+      !snapshotIds.includes(String(returned)) &&
+      String(returned) !== String(watchActivityId ?? "")
+        ? returned
+        : null;
+
+    // No activity we are willing to call ours. Either Garmin returned nothing
+    // we could resolve, or it returned something that was already there. Either
+    // way we do not know what happened, so the row stays parked for reconcile
+    // rather than being written as a success against a null id. Python keeps it
+    // pending for the same reason (`sync.py:648-651`).
+    if (activityId == null) {
+      await store
+        .updatePending(wid, {
+          phase: "processing",
+          last_error:
+            returned != null
+              ? `upload resolved to ${returned}, which existed before this upload`
+              : "upload produced no activity id",
+        })
+        .catch(() => {});
+      return {
+        status: "processing",
+        dryRun: false,
+        wouldUpload: true,
+        dedupDecision: "would_upload",
+        workout: workoutView(workout),
+        fitStats,
+        existingGarminActivityId: null,
+        garminActivityId: null,
+        remaining,
+        syncMethod: "upload",
+        error: null,
+        mergeFallbackReason,
+      };
+    }
 
     // Finalize: rename + describe, then write the terminal row and clear the claim.
-    if (activityId) {
+    {
       await gateway.rename(activityId, title);
       if (descriptionEnabled) {
         await gateway.describe(activityId, generateDescription(workout, fitStats.calories, fitStats.avgHr));
@@ -424,6 +528,13 @@ export async function syncOneWorkout(deps: SyncDeps, options: SyncOneOptions = {
       if (watchActivityId != null) {
         try {
           await gateway.deleteActivity(watchActivityId);
+          // That copy has usually already reached intervals.icu, where the
+          // named activity replacing it would otherwise show up as a duplicate.
+          // Never allowed to fail the sync: the Garmin delete already happened
+          // and tidying elsewhere is not worth losing it over (#586).
+          if (deps.onWatchActivityDeleted && startTime) {
+            await deps.onWatchActivityDeleted(watchActivityId, startTime).catch(() => {});
+          }
         } catch (e) {
           // Two activities is a worse outcome than one, but it is recoverable
           // and losing the sync is not. Report it and keep the success.
@@ -453,21 +564,35 @@ export async function syncOneWorkout(deps: SyncDeps, options: SyncOneOptions = {
       syncMethod: "upload",
       error: null,
       mergeFallbackReason,
+      // Fusion was on, the activity is up, and there was no HR to put in it.
+      // The user turned this setting on, so the one case where it did nothing
+      // should not be silent (#601).
+      noHr: hrFusion && !(hrSamples && hrSamples.length),
     };
   } catch (err) {
-    // The upload may or may not have reached Garmin. Park the pending row in
-    // 'processing' with the error rather than deleting it, so it is never
-    // blindly re-uploaded — reconciliation resolves it later.
+    // Two outcomes that mean opposite things.
+    //
+    // A rejection is definitive: Garmin refused the import, nothing was
+    // created, and no amount of looking or waiting will find it. It parks as
+    // 'failed' so it stops pretending it might still resolve.
+    //
+    // Anything else may or may not have reached Garmin, so it parks as
+    // 'processing' and reconciliation goes looking. Reporting that as an error
+    // invited a retry, and a retry is exactly what must not happen here.
     const message = err instanceof Error ? err.message : String(err);
+    const rejected = err instanceof GarminUploadRejected;
     try {
-      await store.updatePending(wid, { phase: "processing", last_error: message.slice(0, 1000) });
+      await store.updatePending(wid, {
+        phase: rejected ? "failed" : "processing",
+        last_error: message.slice(0, 1000),
+      });
     } catch {
       // If even the checkpoint write fails, drop the claim so the workout can
       // be re-evaluated rather than being wedged in a bad state.
       await store.deletePending(wid).catch(() => {});
     }
     return {
-      status: "error",
+      status: rejected ? "failed" : "processing",
       dryRun: false,
       wouldUpload: true,
       dedupDecision: "would_upload",

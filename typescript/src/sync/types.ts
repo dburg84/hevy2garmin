@@ -34,12 +34,53 @@ export interface FitStats {
   durationS: number;
 }
 
-/** Result of syncing one workout, aligned with the Python status vocabulary. */
+/**
+ * Result of syncing one workout, aligned with the Python status vocabulary
+ * (`sync.py:73`).
+ *
+ * The four states below `error` each say something a caller has to act on
+ * differently, and collapsing them is what #587 and #590 were about.
+ *
+ * - `processing` the upload may or may not have reached Garmin. NOTHING may be
+ *   re-uploaded; reconciliation has to go and look. Reporting this as `error`
+ *   invites a retry, which is the one thing that must not happen.
+ * - `failed` Garmin refused the import outright. There is nothing to find and
+ *   waiting will not help.
+ * - `needs_review` a person has to look. Used where an automatic choice would
+ *   risk destroying something, such as a delete whose target is the activity we
+ *   just created.
+ * - `merge_pending` merge-only was asked for and no watch activity has appeared
+ *   yet, so the workout is deliberately left unsynced rather than uploaded.
+ *
+ * `error` and `none` stay for now because the web routes count them. Narrowing
+ * those is a separate change.
+ */
 export interface SyncOneResult {
-  status: "synced" | "skipped" | "deferred" | "dry_run" | "none" | "error";
+  status:
+    | "synced"
+    | "skipped"
+    | "deferred"
+    | "dry_run"
+    | "none"
+    | "error"
+    | "processing"
+    | "failed"
+    | "needs_review"
+    | "merge_pending";
   dryRun: boolean;
   /** In dry-run: true when a live run WOULD upload a fresh FIT. */
   wouldUpload: boolean;
+  /**
+   * The user asked for HR fusion, the activity went up, and there was no heart
+   * rate to embed.
+   *
+   * Worth its own signal because it is the one case where a setting the user
+   * turned on silently did nothing, and because Garmin recomputes calories from
+   * the embedded HR. Without it the user sees only the symptom, a calorie
+   * figure that disagrees with the app, and reports that instead (#343).
+   * Mirrors `SyncOneResult.no_hr` at `sync.py:80`.
+   */
+  noHr?: boolean;
   dedupDecision: DedupDecision;
   workout: { hevy_id: string; title: string | null; start_time: string | null } | null;
   fitStats: FitStats | null;
@@ -183,12 +224,27 @@ export interface RecoveryResult {
   /**
    * reconciled_synced — Garmin already had it, completed as matched.
    * no_activity — reconcile found nothing on Garmin, pending left in place.
-   * synced — retry re-uploaded successfully.
+   * synced — retry re-uploaded successfully, or finalization completed.
    * not_found — no pending row for this id.
    * no_payload — the pending row has no usable stored workout.
    * error — the retry upload failed (pending parked with the error).
+   * processing — the outcome is still unknown; the row stays parked and a
+   *   later run resumes from its checkpoint. Not a failure, and never a reason
+   *   to re-upload.
+   * needs_review — a person has to look. Used where an automatic choice could
+   *   destroy something or adopt an activity that is not ours.
+   * failed — Garmin refused the import; there is nothing to find.
    */
-  status: "reconciled_synced" | "no_activity" | "synced" | "not_found" | "no_payload" | "error";
+  status:
+    | "reconciled_synced"
+    | "no_activity"
+    | "synced"
+    | "not_found"
+    | "no_payload"
+    | "error"
+    | "processing"
+    | "needs_review"
+    | "failed";
   garminActivityId: number | null;
   error: string | null;
 }
