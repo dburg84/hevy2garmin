@@ -26,7 +26,10 @@ const GARMIN_SSO_URL =
   "&source=https://sso.garmin.com/sso/embed" +
   "&redirectAfterAccountLoginUrl=https://sso.garmin.com/sso/embed" +
   "&redirectAfterAccountCreationUrl=https://sso.garmin.com/sso/embed";
-const WORKER_EXCHANGE_URL = "https://hevy2garmin-exchange-di.gkos.workers.dev/exchange";
+// The ticket exchange on the shared Garmin SSO worker (garmin-auth's
+// DEFAULT_SSO_WORKER_URL). The old hevy2garmin-exchange-di worker was deleted
+// in 2026-09 (garmin-auth#47) and answers 404.
+export const WORKER_EXCHANGE_URL = "https://garmin-auth-sso.gkos.workers.dev/exchange";
 
 /** Pull the ST-… ticket out of a pasted embed URL, or accept a raw ticket. */
 function extractTicket(raw: string): string | null {

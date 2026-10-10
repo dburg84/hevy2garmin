@@ -8,16 +8,44 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- An **Edited in Hevy** badge on the Workouts page, next to **Resync**, on synced workouts that changed in Hevy after they synced. Engine: `HevyClient.getWorkoutEvents(since, page, pageSize)` reads `GET /v1/workouts/events`, and `getWorkoutEventsSince(since, { maxPages })` walks its pages, reporting `truncated` when it stopped at the cap; a failed page throws. Web: `GET /api/edited-workouts` compares each synced row's stored `hevy_updated_at` with its newest Hevy event, as timestamps, reading at most 10 pages of events. The badges load after the page renders, so a slow or failing Hevy only means no badges, and a successful Resync clears its row's badge. Rows marked as synced by hand, skipped, or without a recorded Hevy version get none. Until the web pin reaches the engine release with the events read, no badges show (#701).
+- Resync a workout you edited in Hevy after it was synced. Engine: `syncOneWorkout` takes `targetActivityId` with `targetHevyId` and pushes the current Hevy version into that Garmin activity in place, with the merge's backup and read-back, then renames and describes it and rewrites the ledger row. The workout must already be synced, and nothing is matched by time, uploaded or deleted: the activity is read by id, then identified by that id in Garmin's activity list for its day, which says whether a watch recorded it. Under the `describe` strategy a watch recording keeps its own sets. Heart rate comes from the activity's own FIT and the usual fallbacks, without writes, so calories and average HR match a normal sync. A stored activity Garmin no longer has returns `target_missing`; a name drop restores the previous sets and returns an error. `GarminGateway` gains an optional `activity(id)` read. Web: a **Resync** button next to **Unsync** on rows this app synced to a Garmin activity, with a confirmation, and the outcome shown on the row. It works for workouts from before the sync start date. `scripts/dump_garmin_activity.py` prints one activity's raw JSON, read-only. Until the web pin reaches the engine release with the option, the button reports that the engine does not support resync yet and changes nothing (#701).
+- `H2G_SERVER_SYNC_SCHEDULE` names a self-hosted server's own sync schedule, such as `every 2 hours`. With it set, the dashboard and Settings show that schedule instead of the auto-sync toggle, interval and GitHub token, which only drive the GitHub Actions workflow, and **Sync all** says it runs on the server. Unset, nothing changes. The compose example sets it to match its scheduler (#683).
 - The Hevy webhook on a self-hosted `web/` server syncs merge-first again, as the Python server did. It answers at once, waits 5 minutes, tries up to twice more 10 minutes apart to merge into the watch activity, and uploads a fresh activity only on the last attempt. `WEBHOOK_DELAY_SECONDS`, `WEBHOOK_RETRY_INTERVAL_SECONDS`, `WEBHOOK_MAX_ATTEMPTS` and `WEBHOOK_MAX_INFLIGHT` keep their Python names and defaults. Vercel and the GitHub Actions handoff are unchanged (#656).
 - The web dashboard can be served under a path prefix: `H2G_BASE_PATH`, set at build time, becomes the Next.js `basePath`, and `withBasePath()` prefixes the hand-written `fetch("/api/...")` calls and plain links that Next does not. Unset, the build is unchanged. `web/Dockerfile` takes it as a build argument, and the compose example passes it through. The Python dashboard had this since #305 (#658).
 - `web/Dockerfile` builds the dashboard from its standalone output: multi-stage, runs as the unprivileged `node` user, health check on `/api/version`, amd64 and arm64. `web/docker-compose.example.yml` runs it with Postgres 16 and a small scheduler that calls `GET /api/cron/sync` every two hours (#657).
 
 ### Fixed
 
+- A sync that merged into a watch activity failed with "Invalid time value" (shown as "Something went wrong during the sync.") when the Timing settings were never saved. The settings loader passed `undefined` for each unsaved value, which replaced the default set time with NaN. It now passes only saved values, and the engine ignores any timing value that is not a number (#703).
+- The setup page and the dashboard showed Hevy as "Not connected" when the key came from `HEVY_API_KEY`, though the sync used it. The badge now counts a key from the environment or the saved row, and a key Hevy rejected still shows as disconnected: for an environment key, which has no row to mark, a row holding only the status is written, never the key (#681).
 - The webhook compares the `CRON_SECRET` bearer in constant time (#656).
 - The README said the cron route is `POST /api/cron/sync`. It is `GET`; a POST answers 405. The Self-hosting section now shows the call and says that `GITHUB_PAT` plus `GITHUB_REPO` send the run to GitHub Actions instead (#657).
 - `init` no longer reports a Garmin login it could not save. It checks the token folder can be written before asking for the password, and says so if the token file did not appear afterwards. In Docker on Linux a host folder that Docker created belongs to root, and the image runs as uid 999, so the login was lost and every later run failed with "No cached tokens" (#651, #653).
 - The Docker section of the README mounts both folders for `init`, recommends named volumes, explains uid 999 for host folders, and tells docker-compose users how to reuse their old volumes (#651, #652).
+
+## [0.13.0 (npm)] - 2026-10-09
+
+### Added
+
+- `HevyClient.getWorkoutEvents(since, page, pageSize)` reads one page of Hevy's `GET /v1/workouts/events`, and `getWorkoutEventsSince(since, { maxPages })` walks the pages, newest first. A failed page throws; stopping at `maxPages` returns `truncated: true` (#701).
+
+## [0.12.0 (npm)] - 2026-10-09
+
+### Added
+
+- `syncOneWorkout` takes `targetActivityId` with `targetHevyId` to resync a synced workout into the Garmin activity its ledger row stored, in place, with the merge's backup and read-back. Nothing is matched by time, uploaded or deleted. A stored activity Garmin no longer has returns `target_missing`. `GarminGateway` gains an optional `activity(id)` read (#701).
+
+### Fixed
+
+- `buildExerciseSetsPayload` ignores timing values that are not finite numbers, so an `undefined` no longer replaces a default and throws "Invalid time value" (#703).
+
+## [0.11.1 (npm)] - 2026-10-08
+
+### Fixed
+
+- The activity description counts failure and drop sets as working sets, as the FIT file already does. Before, only `normal` sets were counted, and an exercise logged with only failure sets was missing from the description (#689).
+- Daily heart rate is no longer always empty. The display name the wellness endpoint is keyed by was read from `/userprofile-service/userprofile/profile`, which Garmin now answers with 404, so every workout the watch did not record as an activity synced without HR and nothing said why. The name now comes from `/userprofile-service/socialProfile`, and when there is none the unkeyed `dailyHeartRate?date=` path is asked instead of giving up (#686).
 
 ## [0.11.0 (npm)] - 2026-10-03
 
